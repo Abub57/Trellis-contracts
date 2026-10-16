@@ -53,7 +53,7 @@ commands, the decision points, and the rollback / mitigation paths.
 | Bulk imports | `BatchTooLarge` (940), `InvalidRow` (944), `DuplicateExternalId` (943) | Failed dataset ingest | §3.8 |
 | Metadata retention | Unminimized leak, premature purge, hold collision | Lost audit / PII leak | §3.9 |
 
-Error codes are defined in [`shared/src/errors.rs`](../shared/src/errors.rs).
+Error codes are defined in [`shared/src/errors.rs`](../shared/src/errors.rs) and [`shared/src/release_readiness.rs`](../shared/src/release_readiness.rs).
 
 ---
 
@@ -231,6 +231,31 @@ When an alert reports an automatic rollback (`AutomaticRollbackTriggered` 963) o
    Do not attempt to re-enable the feature until `verify_rollback` has confirmed a clean state.
 
 See [`FEATURE_FLAG_ROLLOUT_GUARD.md`](./FEATURE_FLAG_ROLLOUT_GUARD.md) for complete details.
+
+### 3.10 Release readiness gate & rollback rehearsal failures
+
+When a pull request, CI pipeline, or release promotion is blocked by the Release Readiness Gate:
+
+1. **Diagnose Gate Blockers**:
+   Execute the release readiness evaluation tool locally to isolate the failing gate:
+   ```bash
+   node scripts/release-readiness-gate.cjs --check-all
+   ```
+2. **Resolve by Gate Type**:
+   - **Migrations Gate (`MissingMigrationVerification`, 971)**:
+     Ensure schema versioning guards are active (`docs/STORAGE_SCHEMA_GUARDS.md`), run `shared::migration::dry_run(&plan)`, and ensure any breaking changes in `changelog/entries.json` contain non-empty `migration_notes`.
+   - **Security Gate (`MissingSecurityCheck`, 972)**:
+     Run `./scripts/security/run-audit.sh`. If an allowlist entry expired in `security/audit-allowlist.toml`, renew or remove it.
+   - **Smoke Tests Gate (`MissingSmokeTest`, 973)**:
+     Run `node scripts/verify-deployment.cjs <network>` to verify cross-contract getters and zero-value simulations across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules.
+   - **Rollback Rehearsals Gate (`MissingRollbackRehearsal`, 974)**:
+     Execute a simulated rollback rehearsal using `shared::release_readiness::rehearse_rollback` proving state preservation upon reverting to previous WASM.
+3. **Emergency Bypass (Incident Only)**:
+   If an emergency hotfix cannot await complete non-critical checks, append the documented exception marker to the PR body:
+   ```markdown
+   <!-- release-readiness-exception: <Incident ID, emergency rationale, and approving tech lead> -->
+   ```
+   See [`RELEASE_READINESS.md`](./RELEASE_READINESS.md) for full gate specifications.
 
 ## 5. Emergency rollback
 

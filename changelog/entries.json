@@ -88,5 +88,14 @@
     "migration_notes": "",
     "issue": 229,
     "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-16",
+    "impact": "compatible",
+    "summary": "Added release readiness gate and automated verification for migrations, security checks, smoke tests, and rollback rehearsals across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules (Issue #253).",
+    "migration_notes": "",
+    "issue": 253,
+    "pr": null
   }
 ]

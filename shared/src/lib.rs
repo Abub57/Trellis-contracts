@@ -40,6 +40,7 @@ pub mod projection_repair;
 pub mod quota;
 pub mod reconciliation;
 pub mod recovery;
+pub mod release_readiness;
 pub mod replay;
 pub mod rollout_guard;
 pub mod retention;
@@ -217,6 +218,12 @@ pub use recovery::{
 abandon, complete_step, diagnostics, fail_step, is_stuck, next_action, open_operation, resume,
 OperationKind, OperationState, RecoveryCheckpoint, RecoveryDiagnostics, RecoveryError,
 RecoveryStep, StepOutcome,
+};
+pub use release_readiness::{
+    create_gate_check, evaluate_release_readiness, get_readiness_report, get_rehearsal_count,
+    get_rehearsal_receipt, is_release_ready, rehearse_rollback, GateCheck, GateCheckStatus,
+    GateKind, ReleaseGateError, ReleaseManifest, ReleaseModule, ReleaseReadinessReport,
+    RollbackRehearsalParams, RollbackRehearsalReceipt,
 };
 pub use replay::{consume_payload, ReplayKey, SignedPayload};
 pub use rollout_guard:{
