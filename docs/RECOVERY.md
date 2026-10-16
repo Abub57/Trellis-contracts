@@ -1,5 +1,6 @@
 # Deterministic Recovery Flow (Issue #49)
 
+> Threat model for cross-boundary trust decisions: see [Threat Model](THREAT_MODEL.md).
 Recovery checkpoints for multi-step operations that can be interrupted by a
 wallet action, API call, webhook, worker, or browser session failing partway
 through. The implementation lives in
@@ -79,6 +80,28 @@ let d = diagnostics(&env, &op_id).unwrap();
 operation has not advanced for `stale_after` units, which is what an alert
 should page on.
 
+## Cross-boundary trust decisions
+
+Recovery checkpoints are a trust boundary: the checkpoint is the only
+authority on which external side effects have already fired. Any caller,
+worker, webhook, or operator that resumes an operation is trusting the
+checkpoint to be complete and monotonic. The scenario-based threat model
+in [Threat Model](THREAT_MODEL.md) enumerates the abuse cases that cross
+this boundary (replayed webhooks, forged `resume` calls, stale checkpoints
+after a restore, operator-driven `abandon`) and maps each to a mitigation
+and an executable check.
+
+Highest-risk paths and their checks:
+
+- Duplicate side effect on resume — `complete_step` idempotency, covered by
+  `cargo test -p shared recovery`.
+- Out-of-order advance — `cursor`-gated `complete_step`/`fail_step`,
+  covered by the `StepOutOfOrder` tests.
+- Stale in-flight operation — `is_stuck` alerting, covered by the
+  `stale_after` tests.
+- Checkpoint tampering across a restore — see
+  [Restore Validation](RESTORE_VALIDATION.md).
+
 ## Tests
 
 ```bash
@@ -88,6 +111,18 @@ cargo test -p shared recovery
 The suite covers interruption before (`open_operation` + first step), during
 (`fail_step` on an external step, then `resume`), and after (idempotent
 re-completion, `abandon`, reopen) external side effects.
+
+## Failure modes and recovery
+
+- `RecoveryError::InvalidSteps` — reject the operation; do not open a
+  checkpoint with gaps. Roll back by discarding the id and re-issuing steps.
+- `StepOutOfOrder` — the caller is racing another resumer. Do not retry
+  blindly; re-read `diagnostics` and resume from `cursor`.
+- `AwaitingRecovery` with no progress — page on `is_stuck`; operator either
+  `resume`s (safe, idempotent) or `abandon`s (terminal, no further side
+  effects).
+- Checkpoint lost or rolled back by a restore — treat as untrusted; run
+  [Restore Validation](RESTORE_VALIDATION.md) before resuming any operation.
 
 ## Restore Validation
 

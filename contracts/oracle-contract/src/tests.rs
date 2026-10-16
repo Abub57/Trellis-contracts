@@ -67,17 +67,6 @@ fn test_initialize_requires_the_admin_signature() {
 
 
 #[test]
-fn test_initialize_requires_the_admin_signature() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, OracleContract);
-    let client = OracleContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-
-    assert!(client.try_initialize(&admin).is_err());
-}
-
-
-#[test]
 fn test_get_admin() {
     let fx = setup();
     let client = OracleContractClient::new(&fx.env, &fx.contract_id);
@@ -431,6 +420,152 @@ fn test_sequential_nonces_success() {
         &feed_id,
         &52000_00000000i128,
         &8u32,
+        &ts,
+        &3u64,
+    );
+    assert!(r3.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Scenario-based threat model: cross-boundary trust decisions
+// ---------------------------------------------------------------------------
+//
+// Threat model summary
+// --------------------
+// Trust boundaries:
+//   1. Admin -> contract: privileged configuration (initialize, submitter
+//      registry, quorum policy). Abuse: unauthorized admin action, revoked
+//      admin still acting, double initialization.
+//   2. Submitter -> contract: price attestations. Abuse: unregistered or
+//      deactivated submitter, replay of a previously used nonce, malformed
+//      price/decimals, stale or future timestamps.
+//   3. Contract -> consumer: aggregated price feed. Abuse: reading a feed
+//      before quorum is met, or trusting a feed whose quorum policy was
+//      silently weakened.
+//
+// Highest-risk paths and mitigations:
+//   - Privileged mutation without auth: every admin entrypoint calls
+//     `admin.require_auth()` and re-checks the stored admin is active.
+//   - Replay across submitters: nonces are tracked per (submitter, feed) so
+//     one submitter cannot consume another's nonce space.
+//   - Quorum downgrade: `set_min_quorum`/`set_feed_quorum` validate against
+//     the active submitter count; `clear_feed_quorum` falls back to the
+//     global minimum rather than to zero.
+//   - Stale/future submissions: timestamps are bounded relative to ledger
+//     time so an attacker cannot pin a feed to an old or far-future value.
+//
+// Operational edge cases and recovery:
+//   - If the admin key is compromised, rotate by deactivating the old admin
+//     and registering a new one; existing feeds remain readable but new
+//     submissions from the old admin are rejected.
+//   - If a submitter is compromised, `deactivate_submitter` immediately
+//     removes them from quorum counting; previously accepted submissions
+//     remain in history but no longer count toward new quorum checks.
+//   - If a feed's quorum was set too high, `clear_feed_quorum` restores the
+//     global minimum without deleting historical submissions.
+//   - Rollback: because all state is keyed by feed/submitter, recovery is
+//     additive (register/deactivate) and does not require contract upgrade.
+
+#[test]
+fn test_threat_model_admin_boundary_revoked_admin_cannot_reconfigure() {
+    let fx = setup();
+    let client = OracleContractClient::new(&fx.env, &fx.contract_id);
+    client.deactivate_submitter(&fx.admin, &fx.admin);
+
+    // A revoked admin must not be able to change quorum policy.
+    assert!(client.try_set_min_quorum(&fx.admin, &1).is_err());
+    assert!(client.try_register_submitter(&fx.admin, &fx.submitter1).is_err());
+}
+
+#[test]
+fn test_threat_model_submitter_boundary_replay_is_per_submitter() {
+    let fx = setup();
+    let client = OracleContractClient::new(&fx.env, &fx.contract_id);
+    client.register_submitter(&fx.admin, &fx.submitter1);
+    client.register_submitter(&fx.admin, &fx.submitter2);
+    client.set_min_quorum(&fx.admin, &1);
+
+    let feed_id = symbol_short!("BTCUSD");
+    let ts = fx.env.ledger().timestamp();
+
+    // submitter1 uses nonce 1.
+    assert!(client
+        .try_submit_price(&fx.submitter1, &feed_id, &100, &8, &ts, &1u64)
+        .is_ok());
+
+    // submitter2 may independently use nonce 1: nonce space is per submitter.
+    assert!(client
+        .try_submit_price(&fx.submitter2, &feed_id, &102, &8, &ts, &1u64)
+        .is_ok());
+
+    // submitter1 replaying nonce 1 must fail.
+    assert!(client
+        .try_submit_price(&fx.submitter1, &feed_id, &101, &8, &ts, &1u64)
+        .is_err());
+}
+
+#[test]
+fn test_threat_model_consumer_boundary_quorum_cannot_be_downgraded_below_active() {
+    let fx = setup();
+    let client = OracleContractClient::new(&fx.env, &fx.contract_id);
+    client.register_submitter(&fx.admin, &fx.submitter1);
+    client.register_submitter(&fx.admin, &fx.submitter2);
+    client.set_min_quorum(&fx.admin, &2);
+
+    // Deactivating a submitter must not silently leave quorum above the
+    // active submitter count without the caller re-validating.
+    client.deactivate_submitter(&fx.admin, &fx.submitter2);
+    assert!(client.try_set_min_quorum(&fx.admin, &2).is_err());
+
+    // Clearing a feed override falls back to the global minimum, not zero.
+    let feed_id = symbol_short!("BTCUSD");
+    client.set_feed_quorum(&fx.admin, &feed_id, &1);
+    client.clear_feed_quorum(&fx.admin, &feed_id);
+    assert_eq!(client.get_feed_quorum(&feed_id), client.get_min_quorum());
+}
+
+#[test]
+fn test_threat_model_consumer_boundary_no_read_before_quorum() {
+    let fx = setup();
+    let client = OracleContractClient::new(&fx.env, &fx.contract_id);
+    client.register_submitter(&fx.admin, &fx.submitter1);
+    client.register_submitter(&fx.admin, &fx.submitter2);
+    client.set_min_quorum(&fx.admin, &2);
+
+    let feed_id = symbol_short!("BTCUSD");
+    let ts = fx.env.ledger().timestamp();
+    client.submit_price(&fx.submitter1, &feed_id, &100, &8, &ts, &1u64);
+
+    // A consumer must not be able to read a feed that has not met quorum.
+    assert_eq!(
+        client.try_get_latest_price(&feed_id),
+        Err(Ok(OracleError::InsufficientQuorum))
+    );
+}
+
+#[test]
+fn test_threat_model_recovery_deactivate_compromised_submitter() {
+    let fx = setup();
+    let client = OracleContractClient::new(&fx.env, &fx.contract_id);
+    client.register_submitter(&fx.admin, &fx.submitter1);
+    client.register_submitter(&fx.admin, &fx.submitter2);
+    client.set_min_quorum(&fx.admin, &2);
+
+    let feed_id = symbol_short!("BTCUSD");
+    let ts = fx.env.ledger().timestamp();
+    client.submit_price(&fx.submitter1, &feed_id, &100, &8, &ts, &1u64);
+    client.submit_price(&fx.submitter2, &feed_id, &102, &8, &ts, &1u64);
+    assert_eq!(client.get_latest_price(&feed_id).submission_count, 2);
+
+    // Recovery: deactivate the compromised submitter; quorum must be
+    // re-validated against the remaining active submitters.
+    client.deactivate_submitter(&fx.admin, &fx.submitter1);
+    assert!(!client.is_submitter_active(&fx.submitter1));
+    assert!(client.try_set_min_quorum(&fx.admin, &2).is_err());
+    client.set_min_quorum(&fx.admin, &1);
+    assert_eq!(client.get_min_quorum(), 1);
+}
+u32,
         &ts,
         &3u64,
     );
