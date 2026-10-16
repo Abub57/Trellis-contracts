@@ -143,11 +143,11 @@ let report = apply_operational_cleanup(&env, &live_plan, true)?;
 
 1. **Active Holds (`OperationalHold`)**:
    - `place_operational_hold(env, id, reason, until_ledger)` protects an expired record from deletion.
-   - Indefinite holds (`until_ledger == HOLD_INDEFINITE`) never lapse until explicitly released via `release_operational_hold`.
+   - Indefinite holds (`until_ledger == HOLD_INDEFINITIE`) never lapse until explicitly released via `release_operational_hold`.
 2. **Late Holds**:
    - Holds placed *after* the cleanup plan was produced are re-checked during execution. The late hold wins and is recorded in `report.skipped_protected`.
 3. **Frozen Classes**:
-   - `FinancialSettlement` and `Dispute` metadata cannot be deleted by `apply_operational_cleanup`, even if an operator manually inserts their IDs into `plan.eligible`.
+   - `FinancialSettlement` and `Dispute` metadata cannot be deleted by `apply_operational_cleanup`, even if an operator manually inserts their IDS into `plan.eligible`.
 
 ---
 
@@ -214,7 +214,84 @@ let retention_rec = to_shared_retention_record(&stored);
 
 ---
 
-## 8. Verification & Test Suite
+## 8. High-Cardinality Telemetry Protection
+
+Telemetry metadata is the highest-cardinality and highest-volume operational data in the system. An adversary can flood the contract with unique label values (e.g. one unique `actor` or `seq` per call) to inflate storage, exhaust dashboard cardinality, and degrade observability for legitimate operators. This section defines the protection layer applied before telemetry is persisted or emitted.
+
+### 8.1 Label Safety Rejection Rules
+
+Before any telemetry label is accepted, it is validated by `reject_unsafe_label`. A label is rejected when any of the following hold:
+
+| Rule | Constant | Rationale |
+|---|---|---|
+| Label key exceeds character budget | `MAX_LABEL_KEY_LEN = 64` | Prevents bloated keys that evade grouping. |
+| Label value exceeds character budget | `MAX_LABEL_VALUE_LEN = 256` | Prevents embedded payloads in values. |
+| Label count per sample exceeds budget | `MAX_LABELS_PER_SAMPLE = 16` | Bounds per-sample cardinality. |
+| Label key is not in the allow-list | `ALLOWED_LABEL_KEYS` | Rejects unknown high-cardinality dimensions. |
+| Label value contains control or non-printable bytes | `contains_control_bytes` | Prevents log injection and terminal escape abuse. |
+| Label value matches a prohibited pattern | `PROHIBITED_LABEL_PATTERNS` | Rejects PII, credentials, and secrets at the edge. |
+
+Rejections are counted in `TelemetryProtectionStats::rejected_labels` and surfaced through the `("op_meta", "telemetry_reject")` event so operators can alert on abuse without losing the rejected value.
+
+### 8.2 Redaction Rules
+
+Values that pass label validation are still subject to redaction. `redact_telemetry_value` applies the following in order:
+
+1. **Known-sensitive keys are always redacted** (e.g. `secret`, `token`, `priv_key`, `email`, `phone`, `ip_addr`, `user_pii`, `biometric`, `card_no`, `api_token`, `dbg_trace`). The redacted form is `<redacted:<key>`.
+2. **Account and address like values are hashed** to a stable, short fingerprint (`redact_hash`) so dashboards can group by actor without exposing the raw identifier.
+3. **Free-text fields are truncated** to `MAX_REDACTED_LEN` and suffixed with `<trunc>`.
+4. **Every redaction is counted** in `TelemetryProtectionStats::redacted_values`.
+
+Redaction is deterministic and idempotent: applying it twice yields the same output, and already-redacted markers are not double-redacted.
+
+### 8.3 Sampling Rules
+
+Even with safe labels, telemetry volume can be abusive. `TelemetrySampler` applies a deterministic, ledger-seeded sampling policy:
+
+| Policy | Constant | Behavior |
+|---|---|---|
+| Default sample rate | `DEFAULT_SAMPLE_RATE_PPM = 100_000` (10%) | One in ten samples persisted. |
+| High-cardinality sample rate | `HIGH_CARDINALITY_SAMPLE_RATE_PPM = 10_000` (1) | Applied when a dimension exceeds `HIGH_CARDINALITY_THRESHOLD = 1_000` distinct values. |
+| Emergency sample rate | `EMERGENCY_SAMPLE_RATE_PPM = 1`0 (0.01%) | Applied when `TelemetryProtectionStats::rejected_labels` exceeds `ABUSE_REJECT_THRESHOLD = 10_000` within a window. |
+| Absolute ceiling | `MAX_TELEMETRY_RECORDS_PER_WINDOW = 5_000` | Hard cap on persisted telemetry records per retention window. |
+
+Sampling is deterministic given `(seed, sample_id)`, so operators can reproduce a decision during incident review. Sampled-out records increment `TelemetryProtectionStats::sampled_out` and do not touch storage.
+
+### 8.4 Dashboard Usefulness Under Abuse
+
+When abuse is detected, the protection layer preserves useful signals:
+
+- **Totals remain accurate** via `TelemetryProtectionStats::total_samples`, even when individual samples are dropped.
+- **Rejection and redaction counts** are exposed as first-class metrics so operators can alert on abuse without storing abusive payloads.
+- **Cardinality thresholds** are evaluated per dimension, so a single abusive dimension does not degrade unrelated dashboards.
+- *(Sample rates are reported** in the `TelemetryProtectionStats` so dashboards can annotate charts with the effective sampling factor.
+
+### 8.5 High-Cardinality Edge Cases & Failure Modes
+
+| Scenario | Behavior | Handling |
+|---|---|---|
+| **One unique value per call** | Adversary emits a new label value every call. | High-cardinality threshold trips; sample rate drops to 1 per 1000 and the absolute ceiling bounds storage. |
+| **Label value contains a secret** | Value matches a prohibited pattern. | Rejected at the edge; not stored, not emitted, counted in `rejected_labels`. |
+| **Known-sensitive key** | Key is in the redaction list. | Value replaced with `<redacted:<key>`; counted in `redacted_values`. |
+| **Account identifier in a free-text field** | Value looks account-like. | Hashed to a fingerprint; dashboards group by fingerprint instead of raw id. |
+| **Sample seed mismatch** | Operator questions a sampling decision. | Sampling is deterministic given `(seed, sample_id)`; reproducible during incident review. |
+| **Abuse window expires** | Rejections fall below the threshold. | Sample rate returns to the default 10% on the next window. |
+
+### 8.6 Rollback and Recovery for Telemetry Protection
+
+1. **False-positive rejections**:
+   - Inspect the `(op_meta, telemetry_reject)` events to identify the rejected key and rule.
+   - If the key is legitimate, add it to `ALLOWED_LABEL_KEYS` via the admin-policy mutator and re-deploy the configuration.
+2. **False-negative redaction**:
+   - Add the key to the redaction list and re-deploy. Existing records already stored are not rewritten; rotate them out via the normal retention window.
+3. **Sampling too aggressive**:
+   - Raise `DEFAULT_SAMPLE_RATE_PPM` or lower `HIGH_CARDINALITY_THRESHOLD` through the admin-policy mutator. Sampling changes take effect on the next window and do not rewrite history.
+4. *(Storage ceiling reached**:
+   - The absolute ceiling is a hard limit; excess samples are dropped and counted in `sampled_out`. Reduce the sample rate or wait for the retention window to roll forward.
+
+---
+
+## 9. Verification & Test Suite
 
 The test suite in [`shared/src/operational_metadata.rs`](../shared/src/operational_metadata.rs) covers:
 - Field classification across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules.
@@ -227,3 +304,8 @@ The test suite in [`shared/src/operational_metadata.rs`](../shared/src/operation
 - Late hold placed between planning and execution.
 - Invariant protection of frozen settlement and dispute classes against forged plans.
 - Legacy metadata minimization adapter compatibility.
+- High-cardinality label rejection for oversized, non-allowlisted, control-byte, and prohibited-pattern labels.
+- Redaction of known-sensitive keys, account-like values, and free-text truncation.
+- Deterministic sampling at default, high-cardinality, and emergency rates.
+- Absolute ceiling enforcement and `sampled_out` accounting.
+- Dashboard usefulness invariants: totals remain accurate while samples are dropped.
