@@ -14,6 +14,9 @@
 //! | `DonorIndex(donor)`    | persistent   | Append-only aid-ID list per donor; grows with  |
 //! |                        |              | the donor's history and must persist forever.  |
 //! | `RecipientIndex(addr)` | persistent   | Append-only aid-ID list per recipient.         |
+//! | `Milestones(id)`       | persistent   | Milestone tranches for a phased aid program;   |
+//! |                        |              | must persist until each tranche is settled.    |
+//! | `MilestoneVerifier`    | instance     | Address authorized to verify milestones.       |
 
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
@@ -21,7 +24,7 @@ use shared::storage::{
     instance_get, instance_set, persistent_get, persistent_has, persistent_remove, persistent_set,
 };
 
-use crate::types::AidRecord;
+use crate::types::{AidMilestone, AidRecord};
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -59,6 +62,10 @@ pub enum DataKey {
     CorrelationId(u64),
     /// Contract storage schema version (instance).
     StorageSchemaVersion,
+    /// Milestone tranches for a phased aid program (persistent).
+    Milestones(u64),
+    /// Address authorized to verify milestones (instance).
+    MilestoneVerifier,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +101,37 @@ pub fn has_aid(env: &Env, aid_id: u64) -> bool {
 #[inline]
 pub fn remove_aid(env: &Env, aid_id: u64) {
     persistent_remove(env, &DataKey::Aid(aid_id));
+}
+
+// ---------------------------------------------------------------------------
+// Milestone helpers — persistent storage with automatic TTL extension
+// ---------------------------------------------------------------------------
+
+/// Read the milestone tranches for an aid program.
+///
+/// Returns an empty vector when no milestones have been configured, which
+/// indicates a single-payout (all-or-nothing) program.
+#[inline]
+pub fn get_milestones(env: &Env, aid_id: u64) -> Vec<AidMilestone> {
+    persistent_get(env, &DataKey::Milestones(aid_id)).unwrap_or_else(|| Vec::new(env))
+}
+
+/// Write (or overwrite) the milestone tranches for an aid program.
+#[inline]
+pub fn set_milestones(env: &Env, aid_id: u64, milestones: &Vec<AidMilestone>) {
+    persistent_set(env, &DataKey::Milestones(aid_id), milestones);
+}
+
+/// Returns `true` when the aid program has milestone tranches configured.
+#[inline]
+pub fn has_milestones(env: &Env, aid_id: u64) -> bool {
+    persistent_has(env, &DataKey::Milestones(aid_id))
+}
+
+/// Remove the milestone tranches for an aid program (e.g. after settlement).
+#[inline]
+pub fn remove_milestones(env: &Env, aid_id: u64) {
+    persistent_remove(env, &DataKey::Milestones(aid_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +280,25 @@ pub fn get_default_expiry(env: &Env) -> Option<u64> {
 /// Store the default expiry in seconds.
 pub fn set_default_expiry(env: &Env, expiry_secs: u64) {
     instance_set(env, &DataKey::DefaultExpiry, &expiry_secs);
+}
+
+// ---------------------------------------------------------------------------
+// Milestone verifier — instance storage
+// ---------------------------------------------------------------------------
+
+/// Read the address authorized to verify milestones, if configured.
+pub fn get_milestone_verifier(env: &Env) -> Option<Address> {
+    instance_get(env, &DataKey::MilestoneVerifier)
+}
+
+/// Store the address authorized to verify milestones.
+pub fn set_milestone_verifier(env: &Env, verifier: &Address) {
+    instance_set(env, &DataKey::MilestoneVerifier, verifier);
+}
+
+/// Remove the configured milestone verifier.
+pub fn remove_milestone_verifier(env: &Env) {
+    persistent_remove(env, &DataKey::MilestoneVerifier);
 }
 
 // ---------------------------------------------------------------------------
