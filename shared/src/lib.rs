@@ -36,6 +36,7 @@ pub mod projection_repair;
 pub mod quota;
 pub mod reconciliation;
 pub mod recovery;
+pub mod release_readiness;
 pub mod replay;
 pub mod retention;
 pub mod sanitize;
@@ -201,6 +202,12 @@ pub use recovery::{
     OperationKind, OperationState, RecoveryCheckpoint, RecoveryDiagnostics, RecoveryError,
     RecoveryStep, StepOutcome,
 };
+pub use release_readiness::{
+    create_gate_check, evaluate_release_readiness, get_readiness_report, get_rehearsal_count,
+    get_rehearsal_receipt, is_release_ready, rehearse_rollback, GateCheck, GateCheckStatus,
+    GateKind, ReleaseGateError, ReleaseManifest, ReleaseModule, ReleaseReadinessReport,
+    RollbackRehearsalParams, RollbackRehearsalReceipt,
+};
 pub use replay::{consume_payload, ReplayKey, SignedPayload};
 pub use retention::{
     active_hold, apply_cleanup, class_label, classify, days_to_ledgers, default_policy,
@@ -264,6 +271,8 @@ mod test_storage;
 mod test_timeline;
 #[cfg(test)]
 mod test_projection_repair;
+#[cfg(test)]
+mod test_release_readiness;
 
 // Deterministic ledger-sequence harness controls (Issue #156). Test-only: the
 // harness sets the ledger sequence/timestamp explicitly and never reads the

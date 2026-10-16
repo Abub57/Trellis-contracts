@@ -76,6 +76,7 @@ than once.
 | `shared::config` | Typed env validation (`validate_full_config`, `Environment`), `UnsafeSecret` / `ConfigMissing` fail-fast errors, `RedactedSecret` previews that never print full secrets | `docs/CONFIGURATION.md` |
 | `shared::timeline` | User-facing activity timeline: `Public` / `Participant` / `Maintainer` visibility filtering, stable `ResourceLink` anchors, cursor pagination, and a maintainer-only audit store that is structurally separate from the user timeline | `docs/TIMELINE.md` |
 | `shared::projection_repair` | Stale-cache and stale-index detection, automated repair recommendations (immediate, queued, re-index, quarantine), operator evidence receipts, and rollback recovery across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules | `docs/STALE_PROJECTION_REPAIR.md` |
+| `shared::release_readiness` | Release readiness gate for migrations, security checks, smoke tests, and rollback rehearsals across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules | `docs/RELEASE_READINESS.md` |
 | `shared::ledger_sequence` | Test-only deterministic ledger control (`LedgerSequenceHarness`): explicit sequence plus derived timestamp, forward-only `at()`, and `order_of` / `classify` boundary classification for same-ledger, next-ledger, expired-ledger and out-of-order submissions | `docs/LEDGER_ASSUMPTIONS.md` |
 
 Ledger boundary tests run with `cargo test -p shared --lib test_ledger_sequence`

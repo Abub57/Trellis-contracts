@@ -52,8 +52,9 @@ commands, the decision points, and the rollback / mitigation paths.
 | Quota / abuse | `QuotaExceeded` (22) by many actors | Legit users blocked | §3.7 |
 | Bulk imports | `BatchTooLarge` (940), `InvalidRow` (944), `DuplicateExternalId` (943) | Failed dataset ingest | §3.8 |
 | Stale projections | Inconsistent search, pagination, or balance cache | Phantom records, inaccurate UI/queries | §3.9 |
+| Release readiness / gates | Missing migration, failed audit, missing smoke tests, or rollback rehearsal (970–979) | Blocked deployment or unverified rollout | §3.10 |
 
-Error codes are defined in [`shared/src/errors.rs`](../shared/src/errors.rs).
+Error codes are defined in [`shared/src/errors.rs`](../shared/src/errors.rs) and [`shared/src/release_readiness.rs`](../shared/src/release_readiness.rs).
 
 ---
 
@@ -226,6 +227,31 @@ When derived secondary indexes or cached aggregate projections drift out of sync
    let rollback_receipt = shared::projection_repair::rollback_projection_repair(&env, receipt_id)?;
    ```
    See [`STALE_PROJECTION_REPAIR.md`](./STALE_PROJECTION_REPAIR.md) for detailed architectural specifications.
+
+### 3.10 Release readiness gate & rollback rehearsal failures
+
+When a pull request, CI pipeline, or release promotion is blocked by the Release Readiness Gate:
+
+1. **Diagnose Gate Blockers**:
+   Execute the release readiness evaluation tool locally to isolate the failing gate:
+   ```bash
+   node scripts/release-readiness-gate.cjs --check-all
+   ```
+2. **Resolve by Gate Type**:
+   - **Migrations Gate (`MissingMigrationVerification`, 971)**:
+     Ensure schema versioning guards are active (`docs/STORAGE_SCHEMA_GUARDS.md`), run `shared::migration::dry_run(&plan)`, and ensure any breaking changes in `changelog/entries.json` contain non-empty `migration_notes`.
+   - **Security Gate (`MissingSecurityCheck`, 972)**:
+     Run `./scripts/security/run-audit.sh`. If an allowlist entry expired in `security/audit-allowlist.toml`, renew or remove it.
+   - **Smoke Tests Gate (`MissingSmokeTest`, 973)**:
+     Run `node scripts/verify-deployment.cjs <network>` to verify cross-contract getters and zero-value simulations across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules.
+   - **Rollback Rehearsals Gate (`MissingRollbackRehearsal`, 974)**:
+     Execute a simulated rollback rehearsal using `shared::release_readiness::rehearse_rollback` proving state preservation upon reverting to previous WASM.
+3. **Emergency Bypass (Incident Only)**:
+   If an emergency hotfix cannot await complete non-critical checks, append the documented exception marker to the PR body:
+   ```markdown
+   <!-- release-readiness-exception: <Incident ID, emergency rationale, and approving tech lead> -->
+   ```
+   See [`RELEASE_READINESS.md`](./RELEASE_READINESS.md) for full gate specifications.
 
 ## 5. Emergency rollback
 
