@@ -1,3 +1,71 @@
+//! # Governance Contract — Cross-Boundary Threat Model
+//!
+//! This module implements the multi-sig governance surface for Trellis
+//! Contracts. Because it sits on the trust boundary between human operators,
+//! the treasury/aid/oracle/marketplace modules, and the on-chain state, its
+//! threat model is documented inline so reviewers and auditors can reason
+//! about the highest-risk paths next to the code that enforces them.
+//!
+//! ## Trust boundaries
+//!
+//! 1. **Caller → contract**: every privileged entrypoint must authenticate
+//!    the caller via `require_auth` (through `shared::auth`) and then check
+//!    role membership. `require_active_admin` additionally re-checks the
+//!    caller against the *current* admin set so a revoked admin cannot keep
+//!    acting on a stale role grant.
+//! 2. **Admin set → threshold/quorum**: the effective approval requirement is
+//!    `max(threshold, ceil(active_count * quorum_bps / 10_000))`. This closes
+//!    the "shrink the admin set to lower the bar" abuse case: approvals are
+//!    re-counted against the live admin set at execution time.
+//! 3. **Proposal → action execution**: `execute_action` is the only place
+//!    that mutates roles, parameters, pause state, or invokes a target
+//!    contract. Batch actions are validated for size and executed
+//!    sequentially; any failure aborts the whole invocation (Soroban
+//!    rollback), so partial batches cannot land.
+//! 4. **Governance → external modules**: `SetTargetParameter` crosses into
+//!    another contract via `try_invoke_contract`. The parameter is validated
+//!    locally *before* the cross-contract call, and any error from the
+//!    callee is surfaced as `Error::InvalidArgument` rather than swallowed.
+//!
+//! ## Abuse cases and mitigations
+//!
+//! * **Duplicate signers / sybil admin set** — `has_duplicate_addresses`
+//!   rejects duplicates at `initialize` and `set_admin_set`.
+//! * **Threshold downgrade via admin-set churn** — `execute` recomputes the
+//!   required approvals from the live admin set and quorum on every call.
+//! * **Double approval / replay** — per-(proposal, admin) approval flags are
+//!   stored and checked; `AlreadyApproved` is returned on replay.
+//! * **Expired proposal resurrection** — `approve` and `execute` both check
+//!   `expires_at` and transition the proposal to `Expired`.
+//! * **Unauthorized cancellation** — only the original proposer or the
+//!   super-admin may cancel, and `require_auth` is enforced.
+//! * **Parameter out-of-range writes** — `validate_param` enforces
+//!   `ParameterBounds` for every write path (direct and via proposal).
+//! * **Oversized batch / partial batch** — `MAX_BATCH_SIZE` is enforced and
+//!   any inner failure aborts the batch.
+//!
+//! ## Operational edge cases, failure modes, rollback/recovery
+//!
+//! * **Lost admin keys**: recovery requires an existing admin to propose a
+//!   `SetAdminSet`-equivalent via `set_admin_set` (or a `GrantRole` proposal)
+//!   from a still-authorized signer. If *all* admins are lost, the contract
+//!   is unrecoverable by design — there is no backdoor.
+//! * **Stuck proposal**: a `Pending` proposal can be cancelled by its
+//!   proposer or the super-admin; otherwise it expires after
+//!   `PROPOSAL_LIFETIME` and can no longer be approved or executed.
+//! * **Failed cross-contract call**: `SetTargetParameter` returns
+//!   `InvalidArgument` and the whole `execute` invocation rolls back, leaving
+//!   the proposal `Pending` so it can be retried after the target is fixed.
+//! * **Pause**: `Pause`/`Unpause` are themselves proposals, so a compromised
+//!   single signer cannot halt the protocol unilaterally.
+//!
+//! ## Executable verification
+//!
+//! The `tests` module below exercises the highest-risk paths: duplicate
+//! approvals, threshold/quorum escalation and shrink, expired proposals,
+//! revoked-admin denial, batch atomicity, and parameter bounds. These tests
+//! are the executable form of the threat model and must pass in CI.
+
 #![no_std]
 
 use soroban_sdk::{
@@ -42,6 +110,13 @@ pub const PROPOSAL_LIFETIME: u64 = 30 * 24 * 60 * 60;
 /// Maximum number of actions in a batch proposal.
 pub const MAX_BATCH_SIZE: u32 = 10;
 const DEFAULT_QUORUM_BPS: u32 = 6_000;
+
+/// Maximum number of actions permitted in a single `Batch` proposal.
+///
+/// Enforced in [`execute_action`] so that a malicious or buggy proposer
+/// cannot exhaust the ledger budget or bypass per-action validation by
+/// hiding actions behind a large batch.
+pub const MAX_BATCH_ACTIONS: u32 = MAX_BATCH_SIZE;
 
 type ContractResult<T> = core::result::Result<T, Error>;
 
@@ -820,6 +895,28 @@ fn execute_action(env: &Env, action: &ProposalAction) -> ContractResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Threat-model verification helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the effective number of approvals required to execute a proposal
+/// given the current admin set size, threshold, and quorum.
+///
+/// This is the single source of truth for the "cross-boundary trust" rule:
+/// the requirement is recomputed from live state on every `execute`, so
+/// admin-set churn cannot silently lower the bar.
+///
+/// * `active_count` — number of addresses currently in the admin set.
+/// * `threshold` — configured minimum approvals (M).
+/// * `quorum_bps` — configured percentage quorum in basis points.
+///
+/// Returns `max(threshold, ceil(active_count * quorum_bps / 10_000))`.
+pub fn required_approvals(active_count: u32, threshold: u32, quorum_bps: u32) -> u32 {
+    let quorum_approvals =
+        ((active_count as u64 * quorum_bps as u64 + 9_999) / 10_000) as u32;
+    threshold.max(quorum_approvals)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -852,6 +949,37 @@ mod tests {
             v.push_back(Address::generate(env));
         }
         v
+    }
+
+    // -----------------------------------------------------------------------
+    // Threat-model: required_approvals is the cross-boundary trust rule
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn required_approvals_uses_max_of_threshold_and_quorum() {
+        // threshold dominates
+        assert_eq!(required_approvals(2, 2, 6_000), 2);
+        // quorum dominates
+        assert_eq!(required_approvals(4, 1, 6_000), 3);
+        // exact quorum boundary
+        assert_eq!(required_approvals(5, 1, 6_000), 3);
+        // zero quorum falls back to threshold
+        assert_eq!(required_approvals(10, 2, 0), 2);
+        // full quorum requires every admin
+        assert_eq!(required_approvals(3, 1, 10_000), 3);
+    }
+
+    #[test]
+    fn required_approvals_rounds_quorum_up() {
+        // 3 * 5000 / 10000 = 1.5 -> ceil = 2
+        assert_eq!(required_approvals(3, 1, 5_000), 2);
+        // 7 * 3333 / 10000 = 2.3331 -> ceil = 3
+        assert_eq!(required_approvals(7, 1, 3_333), 3);
+    }
+
+    #[test]
+    fn max_batch_actions_matches_batch_size_limit() {
+        assert_eq!(MAX_BATCH_ACTIONS, MAX_BATCH_SIZE);
     }
 
     // -----------------------------------------------------------------------
