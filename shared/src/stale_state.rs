@@ -22,7 +22,6 @@ pub enum StaleStateReason {
     LedgerAdvanced = 3,
 }
 
-#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryAction {
     RefreshWallet,
@@ -31,7 +30,6 @@ pub enum RecoveryAction {
     RestartFlow,
 }
 
-#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaleStateReport {
     pub stale: bool,
