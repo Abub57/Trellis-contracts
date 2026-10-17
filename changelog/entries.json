@@ -142,5 +142,14 @@
     "migration_notes": "",
     "issue": 299,
     "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-17",
+    "impact": "compatible",
+    "summary": "Implemented permission-aware export pipeline with bounded memory streaming, in-flight cancellation, multi-module role authorization (Treasury, Aid, Referral, Governance, Oracle, Marketplace), and forbidden field purging in shared::export.",
+    "migration_notes": "",
+    "issue": 300,
+    "pr": null
   }
 ]

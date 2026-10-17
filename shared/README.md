@@ -79,6 +79,7 @@ than once.
 | `shared::audit_ledger` | Tamper-evident, hash-chained ledger for privileged and financial events: `append_event` / `append_privileged` / `append_financial`, `verify_chain`, bounded `export_ledger` + storage-free `verify_export`, and a `publish_head_checkpoint` anchor event | `docs/AUDIT_LEDGER.md` |
 | `shared::ledger_sequence` | Test-only deterministic ledger control (`LedgerSequenceHarness`): explicit sequence plus derived timestamp, forward-only `at()`, and `order_of` / `classify` boundary classification for same-ledger, next-ledger, expired-ledger and out-of-order submissions | `docs/LEDGER_ASSUMPTIONS.md` |
 | `shared::rollout_guard` | Feature-flag rollout guard with telemetry monitoring, automated rollback triggers (consecutive failures, error rates, invariant breaches), clean state verification across Treasury, Aid, Referral, Governance, Oracle, and Marketplace, and re-arming protection | `docs/FEATURE_FLAG_ROLLOUT_GUARD.md` |
+| `shared::export` | Permission-aware export pipeline across Treasury, Aid, Referral, Governance, Oracle, and Marketplace: bounded memory chunking (`DEFAULT_EXPORT_CHUNK_SIZE = 25`, `MAX_EXPORT_CHUNK_SIZE = 50`), in-flight cancellation (`cancel_export_stream`), forbidden field purging, and cumulative integrity digests | `docs/EXPORT_PIPELINE.md` |
 
 Ledger boundary tests run with `cargo test -p shared --lib test_ledger_sequence`
 (see `docs/LEDGER_ASSUMPTIONS.md` for the boundary table and determinism rules).
