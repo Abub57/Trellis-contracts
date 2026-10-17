@@ -1,5 +1,6 @@
 #![no_std]
 pub mod abuse;
+pub mod accessibility;
 pub mod analytics;
 pub mod audit_ledger;
 pub mod auth;
@@ -11,6 +12,7 @@ pub mod compat;
 pub mod config;
 pub mod domain_events;
 pub mod dashboard;
+pub mod diagnostics;
 pub mod disclosure;
 pub mod error_taxonomy;
 pub mod errors;
@@ -40,6 +42,7 @@ pub mod reconciliation;
 pub mod recovery;
 pub mod release_readiness;
 pub mod replay;
+pub mod risk_scoring;
 pub mod rollout_guard;
 pub mod retention;
 pub mod sanitize;
@@ -299,6 +302,12 @@ mod test_pagination;
 mod test_audit_ledger;
 #[cfg(test)]
 mod test_release_readiness;
+#[cfg(test)]
+mod test_accessibility;
+#[cfg(test)]
+mod test_diagnostics;
+#[cfg(test)]
+mod test_risk_scoring;
 #[cfg(test)]
 mod test_sanitize;
 #[cfg(test)]
