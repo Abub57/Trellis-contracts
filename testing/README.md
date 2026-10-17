@@ -314,3 +314,23 @@ The example tests in this module run automatically in CI. Add your contract's te
 6. Use snapshot helpers to assert on the exact delta of high-risk operations
 7. Use sandbox mode when a test needs an oracle, token, or RPC round-trip:
    the fakes are deterministic, so failures are reproducible
+
+### Multi-actor concurrency schedules
+
+The concurrency::MultiActorConcurrencyHarness runs a deterministic sequence of
+actor attempts against the same live test state. Each attempt carries a request
+ID, expected revision, and retry number. Tests can arrange stale reads,
+duplicate submissions, and retry storms, then assert contract state after each
+interleaving. Soroban serializes ledger transactions, so the harness models
+submission ordering and stale client snapshots rather than parallel execution.
+
+The treasury scheduled-withdrawal tests cover competing actors, a replayed
+request after success, and an expired action:
+
+    cargo test -p testing concurrency
+
+If a sequence fails, compare the attempt order and expected revision with the
+contract snapshot. A rejected or expired scheduled withdrawal remains
+unexecuted; schedule a new action with a fresh identifier and a valid time
+window before retrying. A duplicate after a successful scheduled withdrawal
+returns NotFound because success consumes the schedule.
