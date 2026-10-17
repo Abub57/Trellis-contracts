@@ -60,6 +60,29 @@
 //! This module is opt-in. Contracts adopt it by calling [`append_event`] on the
 //! privileged/financial paths they already audit. Nothing in the existing
 //! `shared::events`, `shared::timeline`, or contract interfaces is changed.
+//!
+//! ## Duplicate detection and merge review
+//!
+//! The ledger also backs a deterministic duplicate-detection and merge-review
+//! workflow for records that may be entered more than once (aid records,
+//! referrals, marketplace listings, oracle feeds).
+//!
+//! - [`candidate_fingerprint`] derives a stable 32-byte fingerprint from the
+//!   identifying fields of a candidate. It is a pure function of its inputs, so
+//!   two callers observing the same record always compute the same fingerprint.
+//! - [`detect_duplicates`] scans the ledger for entries whose fingerprint
+//!   matches, returning matches in ascending `seq` order. The scan is bounded by
+//!   [`MAX_VERIFY_ENTRIES`] and is therefore reproducible.
+//! - [`propose_merge`] records a reviewable merge proposal as an audited
+//!   [`AuditEventKind::PrivilegedAction`] entry. Proposals are never applied
+//!   automatically; a privileged actor must call [`approve_merge`] or
+//!   [`reject_merge`].
+//! - [`approve_merge`] marks a proposal approved and appends an audit entry.
+//!   Approval is reversible via [`revert_merge`] while the proposal is still
+//!   within the revert window, and every transition is audited.
+//!
+//! All merge state lives under new storage keys, so existing public APIs,
+//! schemas, and user-facing behavior are unchanged.
 
 use soroban_sdk::{
     contracttype, symbol_short, xdr::ToXdr, Address, BytesN, Env, IntoVal, Symbol, Val, Vec,
@@ -89,6 +112,20 @@ pub const MAX_EXPORT_LIMIT: u32 = 100;
 
 /// Largest number of entries one verification pass will scan.
 pub const MAX_VERIFY_ENTRIES: u64 = 10_000;
+
+/// Domain separator mixed into duplicate fingerprints. Kept distinct from
+/// [`AUDIT_DOMAIN`] so a fingerprint can never be confused with an entry hash.
+pub const DUPLICATE_DOMAIN: &str = "trellis_duplicate_fingerprint";
+
+/// Schema version for duplicate fingerprints. Bump only with a documented
+/// migration; it is part of every fingerprint.
+pub const DUPLICATE_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum number of duplicate candidates one detection pass will return.
+pub const MAX_DUPLICATE_CANDIDATES: u32 = 50;
+
+/// Number of ledgers after approval during which a merge may be reverted.
+pub const MERGE_REVERT_WINDOW_LEDGERS: u32 = 17_280;
 
 // ---------------------------------------------------------------------------
 // Event taxonomy
@@ -177,6 +214,16 @@ pub enum AuditEventKind {
     MarketplaceSettled = 80,
     /// A financial action that does not fit a more specific kind.
     FinancialAction = 81,
+
+    // Duplicate / merge review -------------------------------------------
+    /// A duplicate merge was proposed for review.
+    MergeProposed = 90,
+    /// A duplicate merge proposal was approved.
+    MergeApproved = 91,
+    /// A duplicate merge proposal was rejected.
+    MergeRejected = 92,
+    /// An approved duplicate merge was reverted.
+    MergeReverted = 93,
 }
 
 impl AuditEventKind {
@@ -199,7 +246,11 @@ impl AuditEventKind {
             | AuditEventKind::StrategyApproved
             | AuditEventKind::StrategyRevoked
             | AuditEventKind::EmergencyAction
-            | AuditEventKind::PrivilegedAction => AuditEventClass::Privileged,
+            | AuditEventKind::PrivilegedAction
+            | AuditEventKind::MergeProposed
+            | AuditEventKind::MergeApproved
+            | AuditEventKind::MergeRejected
+            | AuditEventKind::MergeReverted => AuditEventClass::Privileged,
             _ => AuditEventClass::Financial,
         }
     }

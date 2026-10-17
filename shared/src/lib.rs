@@ -15,6 +15,7 @@ pub mod domain_events;
 pub mod dashboard;
 pub mod diagnostics;
 pub mod disclosure;
+pub mod duplicate_detection;
 pub mod error_taxonomy;
 pub mod errors;
 pub mod events;
@@ -120,6 +121,13 @@ FailureSeverity, FailureState, HealthCategory, OperationType, PartialFailure,
 RedactedDeadLetter, RedactedPartialFailure,
 };
 pub use disclosure::{DetailField, DetailSeverity, TransactionDetail, TransactionDetailBuilder};
+pub use duplicate_detection::{
+    approve_merge, cancel_merge, detect_candidates, execute_merge, get_merge_review,
+    list_merge_reviews, reject_merge, revert_merge, submit_merge_review, CandidateDuplicate,
+    DuplicateDetectionConfig, DuplicateDetectionError, DuplicateMatchReason, MergeAction,
+    MergeAuditEntry, MergeDecision, MergeReview, MergeReviewStatus, MergeRevertReport,
+    DETECTION_SCHEMA_VERSION, MAX_CANDIDATES_PER_SCAN,
+};
 pub use error_taxonomy::{describe_error, ErrorCategory, ErrorDomain, ErrorInfo};
 pub use errors::Error;
 pub use export::{
@@ -304,6 +312,8 @@ mod test_auth;
 mod test_client;
 #[cfg(test)]
 mod test_disclosure;
+#[cfg(test)]
+mod test_duplicate_detection;
 #[cfg(test)]
 mod test_import;
 #[cfg(test)]
