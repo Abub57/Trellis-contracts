@@ -134,6 +134,8 @@ pub enum RollbackReason {
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateAnomalyKind {
+    /// No anomaly detected; the rollback verified clean.
+    None,
     /// Master switch remained active after rollback.
     FlagStillEnabled,
     /// Rollout basis points was not zeroed after rollback.
@@ -219,7 +221,7 @@ pub struct RollbackAuditRecord {
     pub reason: RollbackReason,
     pub triggered_ledger: u32,
     pub failing_error_code: u32,
-    pub consecutive_failures_at_rollback: u32,
+    pub consecutive_failures: u32,
     pub total_invocations_at_rollback: u32,
     pub failed_invocations_at_rollback: u32,
 }
@@ -240,8 +242,10 @@ pub struct RollbackVerificationReceipt {
     pub checks_evaluated: u32,
     /// Number of checks passed.
     pub checks_passed: u32,
-    /// First detected anomaly, if verification failed.
-    pub anomaly: Option<StateAnomalyKind>,
+    /// First detected anomaly, or [`StateAnomalyKind::None`] when verification passed.
+    /// Stored as a non-optional enum because Soroban cannot encode
+    /// `Option<user-defined enum>` inside a contract type.
+    pub anomaly: StateAnomalyKind,
 }
 
 /// Verification snapshot supplied to verify module-specific state invariants.
@@ -556,7 +560,7 @@ pub fn trigger_auto_rollback(
         reason,
         triggered_ledger: env.ledger().sequence(),
         failing_error_code,
-        consecutive_failures_at_rollback: metrics.consecutive_failures,
+        consecutive_failures: metrics.consecutive_failures,
         total_invocations_at_rollback: metrics.total_invocations,
         failed_invocations_at_rollback: metrics.failed_invocations,
     };
@@ -711,7 +715,7 @@ pub fn verify_rollback(
         rollback_reason,
         checks_evaluated,
         checks_passed,
-        anomaly: detected_anomaly,
+        anomaly: detected_anomaly.unwrap_or(StateAnomalyKind::None),
     };
 
     instance_set(env, &GuardStorageKey::Receipt(target), &receipt);
@@ -910,7 +914,7 @@ mod tests {
             let audit = get_last_rollback_audit(&env, target).unwrap();
             assert_eq!(audit.reason, RollbackReason::ConsecutiveFailuresExceeded);
             assert_eq!(audit.failing_error_code, 701);
-            assert_eq!(audit.consecutive_failures_at_rollback, 3);
+            assert_eq!(audit.consecutive_failures, 3);
         });
     }
 
@@ -986,7 +990,7 @@ mod tests {
 
             assert!(receipt.verified_clean);
             assert_eq!(receipt.checks_passed, receipt.checks_evaluated);
-            assert_eq!(receipt.anomaly, None);
+            assert_eq!(receipt.anomaly, StateAnomalyKind::None);
             assert!(is_rollback_verified(&env, target));
         });
     }
@@ -1002,7 +1006,7 @@ mod tests {
             config.rollout_bps = 500;
             init_or_update_guard(&env, target, &config).unwrap();
 
-            trigger_auto_rollback(&env, target, RollbackReason::AnomalyDetected, 1001);
+            trigger_auto_rollback(&env, target, RollbackReason::StateInconsistency, 1001);
 
             // Dirty state snapshot: escrow mismatch
             let dirty_snapshot = ModuleConsistencySnapshot::marketplace(
@@ -1013,7 +1017,7 @@ mod tests {
 
             let receipt = verify_rollback(&env, target, &dirty_snapshot);
             assert!(!receipt.verified_clean);
-            assert_eq!(receipt.anomaly, Some(StateAnomalyKind::SolvencyDiscrepancy));
+            assert_eq!(receipt.anomaly, StateAnomalyKind::SolvencyDiscrepancy);
             assert!(!is_rollback_verified(&env, target));
         });
     }
