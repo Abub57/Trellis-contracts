@@ -767,6 +767,63 @@ fn test_stable_cursor_pagination_on_aid_contract() {
 }
 
 #[test]
+fn test_cursor_pagination_under_inserts_deletes_and_permission_changes() {
+    let fx = setup();
+    let client = AidContractClient::new(&fx.env, &fx.contract_id);
+    let delegate = Address::generate(&fx.env);
+
+    let expiry = fx.env.ledger().sequence() + 1000;
+    let mut ids = std::vec::Vec::new();
+    for _ in 0..6 {
+        let id = client.create_aid(&fx.donor, &fx.recipient, &100, &expiry, &None);
+        client.grant_search_access(&fx.donor, &id, &delegate);
+        ids.push(id);
+    }
+
+    // Page 1: delegate reads 2 items -> ids[0], ids[1]
+    let page1 = client.search_aids_cursor(&delegate, &None, &2);
+    assert_eq!(page1.records.len(), 2);
+    assert_eq!(page1.records.get(0).unwrap().id, ids[0]);
+    assert_eq!(page1.records.get(1).unwrap().id, ids[1]);
+    assert_eq!(page1.next_cursor, Some(ids[1]));
+    assert!(page1.has_more);
+
+    // Dynamic mutations and permission changes before page 2:
+    // 1. Claim/settle ids[2] (removes from active pending search)
+    client.claim_aid(&ids[2], &fx.recipient);
+
+    // 2. Hide ids[3] by admin
+    client.set_aid_search_visibility(&fx.admin, &ids[3], &false);
+
+    // 3. Revoke delegate's discovery permission on ids[4]
+    client.revoke_search_access(&fx.donor, &ids[4], &delegate);
+
+    // 4. Concurrently insert 2 new aids (ids[6], ids[7]) and grant search access
+    let id6 = client.create_aid(&fx.donor, &fx.recipient, &100, &expiry, &None);
+    client.grant_search_access(&fx.donor, &id6, &delegate);
+    let id7 = client.create_aid(&fx.donor, &fx.recipient, &100, &expiry, &None);
+    client.grant_search_access(&fx.donor, &id7, &delegate);
+
+    // Page 2: with cursor ids[1], limit 2
+    // Must skip ids[2] (claimed), ids[3] (hidden), ids[4] (permission revoked)
+    // and return ids[5] and id6
+    let page2 = client.search_aids_cursor(&delegate, &page1.next_cursor, &2);
+    assert_eq!(page2.records.len(), 2);
+    assert_eq!(page2.records.get(0).unwrap().id, ids[5]);
+    assert_eq!(page2.records.get(1).unwrap().id, id6);
+    assert_eq!(page2.next_cursor, Some(id6));
+    assert!(page2.has_more);
+
+    // Page 3: with cursor id6, limit 2
+    // Must return id7 and terminate
+    let page3 = client.search_aids_cursor(&delegate, &page2.next_cursor, &2);
+    assert_eq!(page3.records.len(), 1);
+    assert_eq!(page3.records.get(0).unwrap().id, id7);
+    assert_eq!(page3.next_cursor, None);
+    assert!(!page3.has_more);
+}
+
+#[test]
 fn test_aid_contract_import_dry_run_and_commit() {
     let fx = setup();
     let client = AidContractClient::new(&fx.env, &fx.contract_id);
