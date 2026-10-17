@@ -6,6 +6,7 @@ use shared::storage::{persistent_get, persistent_set};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     PendingRefund(Address, Address),
+    CollectionInfo(Address),
 }
 
 pub struct PendingRefunds;

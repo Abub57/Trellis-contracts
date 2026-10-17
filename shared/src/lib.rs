@@ -7,6 +7,7 @@ pub mod auth;
 pub mod backfill;
 pub mod batch;
 pub mod canonical;
+pub mod chaos;
 pub mod client;
 pub mod compat;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod disclosure;
 pub mod error_taxonomy;
 pub mod errors;
 pub mod events;
+pub mod evidence;
 pub mod export;
 pub mod feature_flags;
 pub mod health;
@@ -140,6 +142,8 @@ PAYMENT_ESCROW_REFUNDED, PAYMENT_ESCROW_RELEASED, PAYMENT_FEE, PAYMENT_TRANSFER,
 REFERRAL_ACCRUED, REFERRAL_REGISTERED, REFERRER_SET, TIER_CONFIG_SET, TREASURY_DEPOSIT,
 TREASURY_EMERGENCY_WITHDRAW, TREASURY_SET, TREASURY_WITHDRAW,
 };
+pub use evidence::*;
+pub use chaos::*;
 pub use health::{
 get_dependency_health, list_dependency_health, set_dependency_health, DependencyHealth,
 DependencyStatus,

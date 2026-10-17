@@ -190,8 +190,6 @@ mod tests {
         });
     }
 
-    struct TestContract;
-
     #[soroban_sdk::contract]
     struct TestContract;
 

@@ -289,6 +289,7 @@ impl AidContract {
             amount,
             expiry_ledger,
             status: AidStatus::Pending,
+            milestone_count: 0,
         };
         set_aid(&env, aid_id, &record);
         index_aid(&env, aid_id);
@@ -418,6 +419,7 @@ impl AidContract {
                 amount: alloc.amount,
                 expiry_ledger: alloc.expiry_ledger,
                 status: AidStatus::Pending,
+                milestone_count: 0,
             };
 
             set_aid(&env, aid_id, &record);
@@ -560,7 +562,7 @@ impl AidContract {
         match record.status {
             AidStatus::Settled => return Err(AidError::AlreadyClaimed),
             AidStatus::Refunded => return Err(AidError::AlreadyRefunded),
-            AidStatus::Pending => {} // continue
+            AidStatus::Pending | AidStatus::PartiallyClaimed => {} // continue
         }
 
         if env.ledger().sequence() <= record.expiry_ledger {
@@ -647,6 +649,7 @@ impl AidContract {
             amount: total,
             expiry_ledger,
             status: AidStatus::Pending,
+            milestone_count: milestones.len(),
         };
         set_aid(&env, aid_id, &record);
         index_aid(&env, aid_id);
@@ -988,6 +991,7 @@ impl AidContract {
             AidStatus::Pending => shared::compat::CompatAidStatus::Pending,
             AidStatus::Settled => shared::compat::CompatAidStatus::Settled,
             AidStatus::Refunded => shared::compat::CompatAidStatus::Refunded,
+            AidStatus::PartiallyClaimed => shared::compat::CompatAidStatus::Pending,
         };
         Some(shared::compat::CurrentAidRecord {
             id: record.id,
