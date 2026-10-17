@@ -123,14 +123,18 @@ pub use disclosure::{DetailField, DetailSeverity, TransactionDetail, Transaction
 pub use error_taxonomy::{describe_error, ErrorCategory, ErrorDomain, ErrorInfo};
 pub use errors::Error;
 pub use export::{
-authorize_export, create_export, ensure_supported_version as ensure_supported_export_version,
-generate_export, is_safe_field, is_supported_version as is_supported_export_version,
-redact_fields, register_export_artifact, scope_allows_record,
-assert_records_visible, ExportArtifact, ExportError, ExportField, ExportFormat,
-ExportMetadata, ExportRecord, ExportReport, ExportRequest, ExportScope, RecordSensitivity,
-ABSOLUTE_MAX_EXPORT_RECORDS, CURRENT_EXPORT_SCHEMA_VERSION, DEFAULT_EXPORT_TTL_LEDGERS,
-DEFAULT_MAX_EXPORT_RECORDS, EXPORT_SCHEMA_V1, MAX_EXPORT_TTL_LEDGERS,
-MAX_SUPPORTED_EXPORT_SCHEMA_VERSION, MIN_SUPPORTED_EXPORT_SCHEMA_VERSION,
+authorize_export, authorize_module_export, cancel_export_stream, create_export,
+ensure_supported_version as ensure_supported_export_version, finalize_export_stream,
+generate_export, get_export_session, init_export_stream, is_forbidden_field, is_safe_field,
+is_supported_version as is_supported_export_version, purge_forbidden_fields, redact_fields,
+register_export_artifact, scope_allows_record, stream_export_chunk, assert_records_visible,
+ExportArtifact, ExportCancellationReport, ExportError, ExportField, ExportFormat,
+ExportMetadata, ExportModule, ExportRecord, ExportReport, ExportRequest, ExportScope,
+ExportSession, ExportStreamStatus, RecordSensitivity, StreamChunkResult,
+ABSOLUTE_MAX_EXPORT_RECORDS, CURRENT_EXPORT_SCHEMA_VERSION, DEFAULT_EXPORT_CHUNK_SIZE,
+DEFAULT_EXPORT_TTL_LEDGERS, DEFAULT_MAX_EXPORT_RECORDS, EXPORT_SCHEMA_V1,
+MAX_EXPORT_CHUNK_SIZE, MAX_EXPORT_TTL_LEDGERS, MAX_SUPPORTED_EXPORT_SCHEMA_VERSION,
+MIN_SUPPORTED_EXPORT_SCHEMA_VERSION,
 };
 pub use events::{
 emit, emit_collection_registered, emit_import_committed, emit_import_failed,

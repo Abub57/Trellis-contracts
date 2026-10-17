@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `shared::export`: Permission-aware export pipeline with bounded memory chunking, in-flight cancellation, multi-module role authorization (Treasury, Aid, Referral, Governance, Oracle, Marketplace), forbidden field purging, and cumulative SHA-256 stream digests; see `docs/EXPORT_PIPELINE.md`
 - `shared::audit_ledger`: an append-only, hash-chained ledger for privileged and financial events (roles, config, upgrades, pause/unpause, treasury/aid/escrow/referral/governance/oracle/marketplace value movement) with on-chain `verify_chain`, permissioned bounded `export_ledger`, storage-free `verify_export`, a publishable head-checkpoint event, and tamper-detection tests (#233); see `docs/AUDIT_LEDGER.md`
 - `shared::operational_metadata`: Data minimization review and retention enforcement for operational metadata across Treasury, Aid, Referral, Governance, Oracle, and Marketplace modules with classification, redundant field pruning, two-phase testable deletion, hold management, and migration adapters (#229); see `docs/OPERATIONAL_METADATA_RETENTION.md`
 - Two-step ownership transfer with pending acceptance and expiry in `shared::auth` and `contracts/access-control`, requiring explicit cryptographic acceptance by the target owner, supporting automatic expiry rejection, and allowing cancellation before acceptance (#150); see `docs/ACCESS_CONTROL.md`
