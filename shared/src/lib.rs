@@ -36,6 +36,7 @@ pub mod pagination;
 pub mod payments;
 pub mod policy;
 pub mod preflight;
+pub mod public_status;
 pub mod projection_repair;
 pub mod quota;
 pub mod reconciliation;
@@ -195,6 +196,9 @@ pub use preflight::{
 preflight, require_preflight, requires_preflight, PreflightCheck, PreflightCode,
 PreflightInput, PreflightOperation, PreflightReport, PreflightStatus, RiskLevel,
 EXPIRY_WARNING_WINDOW_LEDGERS, HIGH_VALUE_WARNING_BPS.
+};
+pub use public_status::{
+    get_public_status, set_public_status, PublicStatus, PublicStatusReason, PublicStatusRecord,
 };
 pub use projection_repair::{
 default_monitor_config, detect_cache_drift, detect_index_drift,

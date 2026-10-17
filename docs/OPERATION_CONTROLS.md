@@ -57,3 +57,5 @@ Run `shared::preflight` before signing or submitting a high-risk operation (trea
 ## Dependency Health
 
 Use `shared::health` to publish contract-visible assumptions about external dependencies such as RPC, oracle feeds, indexers, and wallets. The health record tracks latest status, last checked ledger, last successful ledger, and failure count.
+
+For user-facing availability states, use [`shared::public_status`](./PUBLIC_STATUS.md). It exposes bounded `Operational`, `Degraded`, `Paused`, and `Maintenance` states with fixed public reason codes, reports `Unknown` until initialized, and requires admin authorization for updates.
