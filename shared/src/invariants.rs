@@ -102,6 +102,7 @@
 extern crate std;
 use std::format;
 use std::string::String;
+use std::vec;
 use std::vec::Vec;
 
 use soroban_sdk::{token, Address, Env};
@@ -531,7 +532,7 @@ pub mod mutations {
 #[cfg(test)]
 mod monitor_tests {
     use super::*;
-    use soroban_sdk::Address;
+    use soroban_sdk::{testutils::Address as _, Address};
 
     #[test]
     fn test_conservation_invariant_passes() {

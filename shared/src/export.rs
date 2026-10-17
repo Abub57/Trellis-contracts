@@ -31,7 +31,7 @@
 //!
 //! See `docs/EXPORT.md` for the workflow, scope table, and maintainer runbook.
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Env, String, Symbol, Vec};
 
 use crate::auth::{has_role, Role};
 use crate::errors::Error;
@@ -329,7 +329,7 @@ pub fn assert_records_visible(
         let Some(record) = records.get(i) else {
             continue;
         };
-        if !scope_allows_record(scope, record, caller) {
+        if !scope_allows_record(scope, &record, caller) {
             return Err(ExportError::RecordNotVisible);
         }
     }
@@ -458,7 +458,7 @@ pub fn generate_export(
                 let Some(t) = request.record_types.get(j) else {
                     continue;
                 };
-                if *t == record.record_type {
+                if t == record.record_type {
                     type_matches = true;
                     break;
                 }
@@ -523,10 +523,12 @@ pub fn generate_export(
 /// accumulate. Authorization is enforced by the calling contract entry point;
 /// this helper only validates and persists.
 pub fn register_export_artifact(env: &Env, artifact: &ExportArtifact) -> Result<(), Error> {
-    let id = Symbol::new(
-        env,
-        &format!("export_{}_{}", artifact.metadata.generator, artifact.metadata.generated_ledger),
-    );
+    // `RetentionRecord.id` is a `Symbol`, and `no_std` contracts cannot build a
+    // formatted string. Export artifacts therefore share one stable retention
+    // slot; a newer export replaces the previous artifact's retention record,
+    // which matches the artifact-expiry model (only the newest artifact for a
+    // caller is retained).
+    let id = symbol_short!("export");
     let record = RetentionRecord {
         id,
         class: DataClass::Export,
@@ -560,7 +562,7 @@ mod tests {
     use super::*;
     use crate::auth::DataKey;
     use crate::retention::get_record;
-    use soroban_sdk::{contract, contractimpl, testutils::Address as _};
+    use soroban_sdk::{contract, contractimpl, testutils::Address as _, testutils::Ledger as _};
 
     /// Minimal contract so unit tests can reach storage-backed helpers:
     /// Soroban only permits storage access inside a contract context.
@@ -920,13 +922,7 @@ mod tests {
             .expect("export should succeed");
         with_storage(&env, || {
             register_export_artifact(&env, &artifact).expect("registration should succeed");
-            let id = Symbol::new(
-                &env,
-                &format!(
-                    "export_{}_{}",
-                    artifact.metadata.generator, artifact.metadata.generated_ledger
-                ),
-            );
+            let id = symbol_short!("export");
             let stored = get_record(&env, &id).expect("record should be stored");
             assert_eq!(stored.class, DataClass::Export);
             assert_eq!(stored.created_ledger, 7_000);
@@ -952,11 +948,7 @@ mod tests {
                 Err(ExportError::ScopeDenied)
             );
             // No retention record was written for the denied export.
-            let id = Symbol::new(
-                &env,
-                &format!("export_{}_{}", caller, env.ledger().sequence()),
-            );
-            assert!(get_record(&env, &id).is_none());
+            assert!(get_record(&env, &symbol_short!("export")).is_none());
         });
     }
 
@@ -974,5 +966,4 @@ mod tests {
         );
     }
 
-    use soroban_sdk::contracterror;
 }
