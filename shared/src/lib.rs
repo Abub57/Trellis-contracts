@@ -264,8 +264,12 @@ persistent_get, persistent_has, persistent_remove, persistent_set, set_paused, t
 temporary_has, temporary_remove, temporary_set, PERSISTENT_BUMP_AMOUNT,
 PERSISTENT_TTL_THRESHOLD, TEMPORARY_BUMP_AMOUNT, TEMPORARY_TTL_THRESHOLD,
 };
-pub use stale_state::{detect as detect_stale_state, RecoveryAction, StaleStateReason,
-StaleStateReport, StateSnapshot};
+pub use stale_state::{
+    check_before_replay, complete_operation, detect as detect_stale_state,
+    enqueue as enqueue_operation, resolve_conflict as resolve_queued_conflict, ConflictResolution,
+    QueueError, QueuedOperation, QueuedOperationStatus, RecoveryAction, StaleStateReason,
+    StaleStateReport, StateSnapshot,
+};
 pub use telemetry::{
 emit_failure, emit_operation, emit_outcome, emit_success, ledger_correlation, publish,
 ActorType, TelemetryEvent, TelemetryResult, TelemetryTimer, CORE_OPERATIONS, OP_ESCROW_CREATE,
