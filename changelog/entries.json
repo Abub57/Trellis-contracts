@@ -106,5 +106,41 @@
     "migration_notes": "",
     "issue": 233,
     "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-17",
+    "impact": "compatible",
+    "summary": "Added accessibility coverage for keyboard navigation, focus management, roving tabindex, and async contract status state mapping to ARIA live regions in shared::accessibility (Issue #296).",
+    "migration_notes": "",
+    "issue": 296,
+    "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-17",
+    "impact": "compatible",
+    "summary": "Added contributor diagnostics for toolchain, dependency invariant validation, contract storage schemas, and workspace fixture health in shared::diagnostics and scripts/contributor-diagnostics.cjs (Issue #297).",
+    "migration_notes": "",
+    "issue": 297,
+    "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-17",
+    "impact": "compatible",
+    "summary": "Implemented explainable risk scoring for suspicious high-impact actions with transparent factor vectors, configurable policies, and actionable verdicts in shared::risk_scoring (Issue #298).",
+    "migration_notes": "",
+    "issue": 298,
+    "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-17",
+    "impact": "compatible",
+    "summary": "Added release readiness checks for schema migrations, deployment smoke tests, automated rollback rehearsals, and dual-admin signoff in shared::release_readiness (Issue #299).",
+    "migration_notes": "",
+    "issue": 299,
+    "pr": null
   }
 ]

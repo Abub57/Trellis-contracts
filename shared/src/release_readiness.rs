@@ -23,8 +23,10 @@ use soroban_sdk::{
     contracterror, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec,
 };
 
+use crate::auth::require_admin;
+use crate::errors::Error;
 use crate::migration::RollbackStrategy;
-use crate::storage::{instance_get, instance_has, instance_set};
+use crate::storage::{instance_get, instance_set};
 
 // ---------------------------------------------------------------------------
 // Error Taxonomy (Range 970–979)
@@ -55,6 +57,23 @@ pub enum ReleaseGateError {
     InvalidModule = 978,
     /// Release is currently blocked by outstanding gate failures.
     ReleaseBlocked = 979,
+}
+
+impl From<ReleaseGateError> for Error {
+    fn from(err: ReleaseGateError) -> Self {
+        match err {
+            ReleaseGateError::GateCheckFailed => Error::ConfigInvalid,
+            ReleaseGateError::MissingMigrationVerification => Error::SchemaMigrationFailed,
+            ReleaseGateError::MissingSecurityCheck => Error::ConfigInvalid,
+            ReleaseGateError::MissingSmokeTest => Error::ConfigInvalid,
+            ReleaseGateError::MissingRollbackRehearsal => Error::ConfigInvalid,
+            ReleaseGateError::InvalidManifest => Error::InvalidArgument,
+            ReleaseGateError::UnauthorizedSignoff => Error::Unauthorized,
+            ReleaseGateError::RehearsalSimulationFailed => Error::ConfigInvalid,
+            ReleaseGateError::InvalidModule => Error::InvalidArgument,
+            ReleaseGateError::ReleaseBlocked => Error::ConfigInvalid,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,3 +480,110 @@ pub fn create_gate_check(
         executed_at: timestamp,
     }
 }
+
+/// Validates that a module's migration plan meets schema forward-compatibility requirements.
+pub fn verify_migration_readiness(
+    module: ReleaseModule,
+    from_version: u32,
+    to_version: u32,
+    has_dry_run_journal: bool,
+    unmigrated_records: u32,
+    timestamp: u64,
+) -> Result<GateCheck, ReleaseGateError> {
+    if to_version <= from_version || !has_dry_run_journal || unmigrated_records > 0 {
+        return Err(ReleaseGateError::MissingMigrationVerification);
+    }
+    Ok(create_gate_check(
+        symbol_short!("mig_ver"),
+        GateKind::Migration,
+        module,
+        GateCheckStatus::Passed,
+        symbol_short!("mig_ok"),
+        timestamp,
+    ))
+}
+
+/// Validates that a module satisfies deployment smoke tests (RPC, getter liveness, client wiring).
+pub fn verify_smoke_test_readiness(
+    module: ReleaseModule,
+    rpc_healthy: bool,
+    getter_liveness: bool,
+    client_binding_intact: bool,
+    timestamp: u64,
+) -> Result<GateCheck, ReleaseGateError> {
+    if !rpc_healthy || !getter_liveness || !client_binding_intact {
+        return Err(ReleaseGateError::MissingSmokeTest);
+    }
+    Ok(create_gate_check(
+        symbol_short!("smk_ver"),
+        GateKind::SmokeTest,
+        module,
+        GateCheckStatus::Passed,
+        symbol_short!("smk_ok"),
+        timestamp,
+    ))
+}
+
+/// Validates rollback readiness: verifies pre-upgrade snapshot and successful rehearsal receipt.
+pub fn verify_rollback_readiness(
+    module: ReleaseModule,
+    strategy: RollbackStrategy,
+    snapshot_stored: bool,
+    rehearsal_passed: bool,
+    timestamp: u64,
+) -> Result<GateCheck, ReleaseGateError> {
+    if !snapshot_stored || !rehearsal_passed || strategy == RollbackStrategy::Manual {
+        return Err(ReleaseGateError::MissingRollbackRehearsal);
+    }
+    Ok(create_gate_check(
+        symbol_short!("rlb_ver"),
+        GateKind::RollbackRehearsal,
+        module,
+        GateCheckStatus::Passed,
+        symbol_short!("rlb_ok"),
+        timestamp,
+    ))
+}
+
+/// Signs off on a verified release readiness report using admin authority.
+pub fn signoff_release(
+    env: &Env,
+    admin: &Address,
+    release_version: &Symbol,
+) -> Result<(), Error> {
+    require_admin(env, admin)?;
+    if !is_release_ready(env, release_version) {
+        return Err(Error::ConfigInvalid);
+    }
+    env.events().publish(
+        (symbol_short!("rel_sign"), release_version.clone()),
+        (admin.clone(), env.ledger().timestamp()),
+    );
+    Ok(())
+}
+
+/// Emergency dual-administrator signoff to bypass gates under audited exception markers.
+pub fn emergency_bypass_signoff(
+    env: &Env,
+    primary_admin: &Address,
+    secondary_admin: &Address,
+    release_version: &Symbol,
+    exception_reason: Symbol,
+) -> Result<(), Error> {
+    require_admin(env, primary_admin)?;
+    require_admin(env, secondary_admin)?;
+    if primary_admin == secondary_admin {
+        return Err(Error::InvalidArgument);
+    }
+    env.events().publish(
+        (symbol_short!("emrg_byp"), release_version.clone()),
+        (
+            primary_admin.clone(),
+            secondary_admin.clone(),
+            exception_reason,
+            env.ledger().timestamp(),
+        ),
+    );
+    Ok(())
+}
+

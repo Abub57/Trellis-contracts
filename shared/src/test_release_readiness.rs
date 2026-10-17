@@ -2,9 +2,11 @@ use soroban_sdk::{symbol_short, testutils::Address as _, Address, BytesN, Env, S
 
 use crate::migration::RollbackStrategy;
 use crate::release_readiness::{
-    create_gate_check, evaluate_release_readiness, get_readiness_report, get_rehearsal_count,
-    get_rehearsal_receipt, is_release_ready, rehearse_rollback, GateCheckStatus, GateKind,
-    ReleaseGateError, ReleaseManifest, ReleaseModule, RollbackRehearsalParams,
+    create_gate_check, emergency_bypass_signoff, evaluate_release_readiness, get_readiness_report,
+    get_rehearsal_count, get_rehearsal_receipt, is_release_ready, rehearse_rollback, signoff_release,
+    verify_migration_readiness, verify_rollback_readiness, verify_smoke_test_readiness,
+    GateCheckStatus, GateKind, ReleaseGateError, ReleaseManifest, ReleaseModule,
+    RollbackRehearsalParams,
 };
 
 #[test]
@@ -458,3 +460,104 @@ fn test_rehearsal_rejects_invalid_version_order() {
     let err = rehearse_rollback(&env, &params).unwrap_err();
     assert_eq!(err, ReleaseGateError::RehearsalSimulationFailed);
 }
+
+#[test]
+fn test_verify_migration_readiness_normal_and_failure() {
+    let now = 100_000u64;
+    // Normal pass: version increments, dry run journal present, 0 unmigrated records
+    let check = verify_migration_readiness(ReleaseModule::Treasury, 1, 2, true, 0, now).unwrap();
+    assert_eq!(check.status, GateCheckStatus::Passed);
+    assert_eq!(check.kind, GateKind::Migration);
+
+    // Failure: unmigrated records > 0
+    let err1 = verify_migration_readiness(ReleaseModule::Treasury, 1, 2, true, 5, now).unwrap_err();
+    assert_eq!(err1, ReleaseGateError::MissingMigrationVerification);
+
+    // Failure: missing dry run journal
+    let err2 = verify_migration_readiness(ReleaseModule::Treasury, 1, 2, false, 0, now).unwrap_err();
+    assert_eq!(err2, ReleaseGateError::MissingMigrationVerification);
+
+    // Failure: invalid version order
+    let err3 = verify_migration_readiness(ReleaseModule::Treasury, 2, 2, true, 0, now).unwrap_err();
+    assert_eq!(err3, ReleaseGateError::MissingMigrationVerification);
+}
+
+#[test]
+fn test_verify_smoke_test_readiness_normal_and_failure() {
+    let now = 100_000u64;
+    // Normal pass
+    let check = verify_smoke_test_readiness(ReleaseModule::Aid, true, true, true, now).unwrap();
+    assert_eq!(check.status, GateCheckStatus::Passed);
+    assert_eq!(check.kind, GateKind::SmokeTest);
+
+    // Failure: RPC unhealthy
+    let err1 = verify_smoke_test_readiness(ReleaseModule::Aid, false, true, true, now).unwrap_err();
+    assert_eq!(err1, ReleaseGateError::MissingSmokeTest);
+
+    // Failure: getter liveness broken
+    let err2 = verify_smoke_test_readiness(ReleaseModule::Aid, true, false, true, now).unwrap_err();
+    assert_eq!(err2, ReleaseGateError::MissingSmokeTest);
+
+    // Failure: client binding broken
+    let err3 = verify_smoke_test_readiness(ReleaseModule::Aid, true, true, false, now).unwrap_err();
+    assert_eq!(err3, ReleaseGateError::MissingSmokeTest);
+}
+
+#[test]
+fn test_verify_rollback_readiness_normal_and_failure() {
+    let now = 100_000u64;
+    // Normal pass: Revert strategy, snapshot stored, rehearsal passed
+    let check = verify_rollback_readiness(ReleaseModule::Referral, RollbackStrategy::Revert, true, true, now).unwrap();
+    assert_eq!(check.status, GateCheckStatus::Passed);
+    assert_eq!(check.kind, GateKind::RollbackRehearsal);
+
+    // Failure: snapshot missing
+    let err1 = verify_rollback_readiness(ReleaseModule::Referral, RollbackStrategy::Revert, false, true, now).unwrap_err();
+    assert_eq!(err1, ReleaseGateError::MissingRollbackRehearsal);
+
+    // Failure: rehearsal failed
+    let err2 = verify_rollback_readiness(ReleaseModule::Referral, RollbackStrategy::Revert, true, false, now).unwrap_err();
+    assert_eq!(err2, ReleaseGateError::MissingRollbackRehearsal);
+
+    // Failure: Manual strategy cannot automatically recover
+    let err3 = verify_rollback_readiness(ReleaseModule::Referral, RollbackStrategy::Manual, true, true, now).unwrap_err();
+    assert_eq!(err3, ReleaseGateError::MissingRollbackRehearsal);
+}
+
+#[test]
+fn test_release_signoff_authorization() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    crate::auth::set_admin(&env, &admin);
+
+    let rel_version = symbol_short!("rel_test");
+
+    // Attacker cannot signoff
+    let err = signoff_release(&env, &attacker, &rel_version);
+    assert_eq!(err.err(), Some(crate::errors::Error::Unauthorized));
+
+    // Admin cannot signoff if release is not evaluated/ready
+    let err2 = signoff_release(&env, &admin, &rel_version);
+    assert_eq!(err2.err(), Some(crate::errors::Error::ConfigInvalid));
+}
+
+#[test]
+fn test_emergency_dual_bypass_signoff() {
+    let env = Env::default();
+    let admin1 = Address::generate(&env);
+    let admin2 = Address::generate(&env);
+    crate::auth::set_admin(&env, &admin1);
+
+    let rel_version = symbol_short!("rel_emrg");
+
+    // Single admin twice rejected
+    let err1 = emergency_bypass_signoff(&env, &admin1, &admin1, &rel_version, symbol_short!("hotfix"));
+    assert_eq!(err1.err(), Some(crate::errors::Error::InvalidArgument));
+
+    // Set secondary admin permissions
+    crate::auth::grant_role(&env, &admin1, &admin2, crate::auth::Role::Admin).unwrap();
+    let res = emergency_bypass_signoff(&env, &admin1, &admin2, &rel_version, symbol_short!("hotfix"));
+    assert!(res.is_ok());
+}
+
