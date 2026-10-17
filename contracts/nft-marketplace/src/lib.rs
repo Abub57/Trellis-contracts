@@ -19,11 +19,13 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env, Map, Symbol,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, BytesN, Env, Map, Symbol,
     Vec,
 };
 
@@ -31,7 +33,9 @@ pub mod storage;
 
 use shared::auth;
 use shared::events;
-use shared::storage::{instance_get, instance_set, persistent_read, persistent_set};
+use shared::storage::{
+    instance_get, instance_set, persistent_get, persistent_has, persistent_read, persistent_set,
+};
 use shared::utils::{is_expired, now};
 use storage::{DataKey, PendingRefunds};
 
@@ -120,7 +124,6 @@ const KEY_FEE_RECIPIENT: Symbol = symbol_short!("fee_rcp");
 const KEY_BID_INCREMENT_BPS: Symbol = symbol_short!("bid_inc");
 const KEY_AUTO_EXT: Symbol = symbol_short!("auto_ext");
 const KEY_CURRENCIES: Symbol = symbol_short!("currenc");
-const KEY_COLLECTIONS: Symbol = symbol_short!("collects");
 const KEY_LISTING_SEQ: Symbol = symbol_short!("list_seq");
 const KEY_AUCTION_SEQ: Symbol = symbol_short!("auc_seq");
 const KEY_OFFER_SEQ: Symbol = symbol_short!("off_seq");
@@ -290,9 +293,15 @@ pub struct BulkResult {
 // Internal helpers
 // ===========================================================================
 
+fn default_correlation_id(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[0u8; 32])
+}
+
 fn emit_action(env: &Env, caller: &Address, action: Symbol) {
+    let cid = default_correlation_id(env);
     events::emit_action_executed(
         env,
+        &cid,
         symbol_short!("nft_mkt"),
         action,
         caller,
@@ -379,9 +388,7 @@ fn sentinel_address(env: &Env) -> Address {
 }
 
 fn verify_collection(env: &Env, collection: &Address) -> MktResult<()> {
-    let collections: Map<Address, CollectionInfo> =
-        instance_get(env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(env));
-    if collections.get(collection.clone()).is_some() {
+    if persistent_has(env, &DataKey::CollectionInfo(collection.clone())) {
         Ok(())
     } else {
         Err(MarketError::CollectionNotFound)
@@ -389,9 +396,7 @@ fn verify_collection(env: &Env, collection: &Address) -> MktResult<()> {
 }
 
 fn collection_exists(env: &Env, collection: &Address) -> bool {
-    let collections: Map<Address, CollectionInfo> =
-        instance_get(env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(env));
-    collections.get(collection.clone()).is_some()
+    persistent_has(env, &DataKey::CollectionInfo(collection.clone()))
 }
 
 fn update_collection_stats(
@@ -400,9 +405,7 @@ fn update_collection_stats(
     listing_delta: i32,
     auction_delta: i32,
 ) {
-    let collections: Map<Address, CollectionInfo> =
-        instance_get(env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(env));
-    if let Some(mut info) = collections.get(collection.clone()) {
+    if let Some(mut info) = persistent_get::<DataKey, CollectionInfo>(env, &DataKey::CollectionInfo(collection.clone())) {
         if listing_delta > 0 {
             info.active_listings += listing_delta as u32;
         } else if listing_delta < 0 && info.active_listings > 0 {
@@ -413,9 +416,7 @@ fn update_collection_stats(
         } else if auction_delta < 0 && info.active_auctions > 0 {
             info.active_auctions -= auction_delta.unsigned_abs();
         }
-        let mut collections = collections;
-        collections.set(collection.clone(), info);
-        instance_set(env, &KEY_COLLECTIONS, &collections);
+        persistent_set(env, &DataKey::CollectionInfo(collection.clone()), &info);
     }
 }
 
@@ -466,8 +467,8 @@ fn compute_platform_fee(price: i128, platform_fee_bps: i128) -> MktResult<i128> 
 fn compute_royalty_amounts(
     price: i128,
     royalty_config: &RoyaltyConfig,
-) -> std::vec::Vec<(Address, i128)> {
-    let mut amounts = std::vec::Vec::new();
+) -> alloc::vec::Vec<(Address, i128)> {
+    let mut amounts = alloc::vec::Vec::new();
     if royalty_config.total_bps <= 0 {
         return amounts;
     }
@@ -491,10 +492,11 @@ fn distribute_royalties(
     royalty_amounts: &[(Address, i128)],
     token_id: u64,
 ) {
+    let cid = default_correlation_id(env);
     for (recipient, amount) in royalty_amounts.iter() {
         if *amount > 0 {
             payment_client.transfer(from, recipient, amount);
-            events::emit_royalty_paid(env, token_id, recipient, *amount, now(env));
+            events::emit_royalty_paid(env, &cid, token_id, recipient, *amount, now(env));
         }
     }
 }
@@ -536,17 +538,14 @@ impl NftMarketplace {
         instance_set(&env, &KEY_BID_INCREMENT_BPS, &bid_increment_bps);
         instance_set(&env, &KEY_AUTO_EXT, &auto_extension_seconds);
         instance_set(&env, &KEY_CURRENCIES, &Map::<Address, bool>::new(&env));
-        instance_set(
-            &env,
-            &KEY_COLLECTIONS,
-            &Map::<Address, CollectionInfo>::new(&env),
-        );
         instance_set(&env, &KEY_LISTING_SEQ, &0_u64);
         instance_set(&env, &KEY_AUCTION_SEQ, &0_u64);
         instance_set(&env, &KEY_OFFER_SEQ, &0_u64);
 
+        let cid = default_correlation_id(&env);
         events::emit_module_initialized(
             &env,
+            &cid,
             symbol_short!("nft_mkt"),
             1,
             &admin,
@@ -668,9 +667,8 @@ impl NftMarketplace {
     ) -> Result<(), MarketError> {
         require_admin(&env, &caller)?;
 
-        let collections: Map<Address, CollectionInfo> =
-            instance_get(&env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(&env));
-        if collections.get(collection.clone()).is_some() {
+        let collection_key = DataKey::CollectionInfo(collection.clone());
+        if persistent_has(&env, &collection_key) {
             return Err(MarketError::CollectionAlreadyRegistered);
         }
         if metadata_hash.len() != METADATA_HASH_LEN {
@@ -706,11 +704,10 @@ impl NftMarketplace {
             active_auctions: 0,
         };
 
-        let mut collections = collections;
-        collections.set(collection.clone(), info);
-        instance_set(&env, &KEY_COLLECTIONS, &collections);
+        persistent_set(&env, &collection_key, &info);
 
-        events::emit_collection_registered(&env, &collection, &caller, now(&env));
+        let cid = default_correlation_id(&env);
+        events::emit_collection_registered(&env, &cid, &collection, &caller, now(&env));
         Ok(())
     }
 
@@ -722,11 +719,9 @@ impl NftMarketplace {
     ) -> Result<(), MarketError> {
         caller.require_auth();
 
-        let mut collections: Map<Address, CollectionInfo> =
-            instance_get(&env, &KEY_COLLECTIONS).ok_or(MarketError::CollectionNotFound)?;
-        let mut info = collections
-            .get(collection.clone())
-            .ok_or(MarketError::CollectionNotFound)?;
+        let collection_key = DataKey::CollectionInfo(collection.clone());
+        let mut info: CollectionInfo =
+            persistent_get(&env, &collection_key).ok_or(MarketError::CollectionNotFound)?;
 
         if info.admin != caller {
             return Err(MarketError::Unauthorized);
@@ -748,16 +743,12 @@ impl NftMarketplace {
             recipients: royalty_recipients,
             total_bps,
         };
-        collections.set(collection, info);
-        instance_set(&env, &KEY_COLLECTIONS, &collections);
+        persistent_set(&env, &collection_key, &info);
         Ok(())
     }
 
     pub fn get_collection(env: Env, collection: Address) -> Result<CollectionInfo, MarketError> {
-        let collections: Map<Address, CollectionInfo> =
-            instance_get(&env, &KEY_COLLECTIONS).ok_or(MarketError::CollectionNotFound)?;
-        collections
-            .get(collection)
+        persistent_get(&env, &DataKey::CollectionInfo(collection))
             .ok_or(MarketError::CollectionNotFound)
     }
 
@@ -804,8 +795,10 @@ impl NftMarketplace {
         persistent_set(&env, &listing_key(listing_id), &listing);
         update_collection_stats(&env, &collection, 1, 0);
 
+        let cid = default_correlation_id(&env);
         events::emit_nft_listed(
             &env,
+            &cid,
             listing_id,
             &seller,
             &collection,
@@ -839,12 +832,12 @@ impl NftMarketplace {
 
         let platform_fee = compute_platform_fee(listing.price, platform_fee_bps)?;
 
-        let collections: Map<Address, CollectionInfo> =
-            instance_get(&env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(&env));
-        let royalty_amounts = collections
-            .get(listing.collection.clone())
-            .map(|info| compute_royalty_amounts(listing.price, &info.royalty_config))
-            .unwrap_or_default();
+        let royalty_amounts = persistent_get::<DataKey, CollectionInfo>(
+            &env,
+            &DataKey::CollectionInfo(listing.collection.clone()),
+        )
+        .map(|info| compute_royalty_amounts(listing.price, &info.royalty_config))
+        .unwrap_or_default();
 
         let total_royalties: i128 = royalty_amounts.iter().map(|(_, a)| *a).sum();
         let seller_proceeds = listing
@@ -877,8 +870,10 @@ impl NftMarketplace {
         );
 
         update_collection_stats(&env, &listing.collection, -1, 0);
+        let cid = default_correlation_id(&env);
         events::emit_nft_sold(
             &env,
+            &cid,
             listing_id,
             &listing.seller,
             &buyer,
@@ -978,8 +973,10 @@ impl NftMarketplace {
 
         persistent_set(&env, &auction_key(auction_id), &auction);
         update_collection_stats(&env, &collection, 0, 1);
+        let cid = default_correlation_id(&env);
         events::emit_nft_auction(
             &env,
+            &cid,
             auction_id,
             &seller,
             &collection,
@@ -1066,7 +1063,8 @@ impl NftMarketplace {
         auction.end_time = new_end;
         persistent_set(&env, &key, &auction);
 
-        events::emit_nft_bid(&env, auction_id, &bidder, bid_amount, new_end);
+        let cid = default_correlation_id(&env);
+        events::emit_nft_bid(&env, &cid, auction_id, &bidder, bid_amount, new_end);
         Ok(())
     }
 
@@ -1111,12 +1109,12 @@ impl NftMarketplace {
 
         let platform_fee = compute_platform_fee(final_price, platform_fee_bps)?;
 
-        let collections: Map<Address, CollectionInfo> =
-            instance_get(&env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(&env));
-        let royalty_amounts = collections
-            .get(auction.collection.clone())
-            .map(|info| compute_royalty_amounts(final_price, &info.royalty_config))
-            .unwrap_or_default();
+        let royalty_amounts = persistent_get::<DataKey, CollectionInfo>(
+            &env,
+            &DataKey::CollectionInfo(auction.collection.clone()),
+        )
+        .map(|info| compute_royalty_amounts(final_price, &info.royalty_config))
+        .unwrap_or_default();
 
         let total_royalties: i128 = royalty_amounts.iter().map(|(_, a)| *a).sum();
         let seller_proceeds = final_price
@@ -1156,7 +1154,8 @@ impl NftMarketplace {
         );
 
         update_collection_stats(&env, &auction.collection, 0, -1);
-        events::emit_nft_settle(&env, auction_id, &winner, final_price, now(&env));
+        let cid = default_correlation_id(&env);
+        events::emit_nft_settle(&env, &cid, auction_id, &winner, final_price, now(&env));
         Ok(())
     }
 
@@ -1222,8 +1221,10 @@ impl NftMarketplace {
 
         persistent_set(&env, &auction_key(auction_id), &auction);
         update_collection_stats(&env, &collection, 0, 1);
+        let cid = default_correlation_id(&env);
         events::emit_nft_auction(
             &env,
+            &cid,
             auction_id,
             &seller,
             &collection,
@@ -1264,12 +1265,12 @@ impl NftMarketplace {
 
         let platform_fee = compute_platform_fee(current_price, platform_fee_bps)?;
 
-        let collections: Map<Address, CollectionInfo> =
-            instance_get(&env, &KEY_COLLECTIONS).unwrap_or_else(|| Map::new(&env));
-        let royalty_amounts = collections
-            .get(auction.collection.clone())
-            .map(|info| compute_royalty_amounts(current_price, &info.royalty_config))
-            .unwrap_or_default();
+        let royalty_amounts = persistent_get::<DataKey, CollectionInfo>(
+            &env,
+            &DataKey::CollectionInfo(auction.collection.clone()),
+        )
+        .map(|info| compute_royalty_amounts(current_price, &info.royalty_config))
+        .unwrap_or_default();
 
         let total_royalties: i128 = royalty_amounts.iter().map(|(_, a)| *a).sum();
         let seller_proceeds = current_price
@@ -1295,8 +1296,10 @@ impl NftMarketplace {
         );
 
         update_collection_stats(&env, &auction.collection, 0, -1);
+        let cid = default_correlation_id(&env);
         events::emit_nft_sold(
             &env,
+            &cid,
             auction_id,
             &auction.seller,
             &buyer,
@@ -1423,7 +1426,8 @@ impl NftMarketplace {
         };
 
         persistent_set(&env, &offer_key(offer_id), &offer);
-        events::emit_nft_offer(&env, offer_id, &offerer, token_id, offer_amount, expires_at);
+        let cid = default_correlation_id(&env);
+        events::emit_nft_offer(&env, &cid, offer_id, &offerer, token_id, offer_amount, expires_at);
         Ok(offer_id)
     }
 
@@ -1485,8 +1489,10 @@ impl NftMarketplace {
         let nft_client = token::Client::new(&env, &offer.collection);
         nft_client.transfer(&caller, &offer.offerer, &(offer.amount as i128));
 
+        let cid = default_correlation_id(&env);
         events::emit_nft_sold(
             &env,
+            &cid,
             offer_id,
             &offer.recipient,
             &offer.offerer,
@@ -2703,4 +2709,28 @@ mod tests {
         assert_eq!(a.current_bidder, b2);
         assert_eq!(c.get_pending_refund(&b1, &m.currency), 1_000);
     }
+
+    #[test]
+    fn test_stress_multiple_collections_no_instance_storage_bloat() {
+        let m = setup();
+        init(&m);
+        let c = client(&m);
+
+        // Register 105 distinct collections into persistent storage
+        for _i in 0..105u32 {
+            let col_addr = Address::generate(&m.env);
+            c.register_collection(
+                &m.admin,
+                &col_addr,
+                &Symbol::new(&m.env, "TEST"),
+                &Bytes::from_slice(&m.env, b"ipfs://QmTestCol"),
+                &mk_hash(&m.env),
+                &TokenStandard::ERC721,
+                &Vec::new(&m.env),
+            );
+            let info = c.get_collection(&col_addr);
+            assert_eq!(info.address, col_addr);
+        }
+    }
 }
+

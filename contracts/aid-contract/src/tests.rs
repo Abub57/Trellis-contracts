@@ -1375,7 +1375,7 @@ fn test_batch_create_aid_paused_contract_rejected() {
     let fx = setup();
     let client = AidContractClient::new(&fx.env, &fx.contract_id);
 
-    client.pause(&fx.admin);
+    client.set_paused(&fx.admin, &true);
 
     let expiry = fx.env.ledger().sequence() + 1000;
     let mut allocations = Vec::new(&fx.env);
@@ -1494,3 +1494,71 @@ fn test_batch_create_aid_fuzz_validation_and_atomicity() {
         }
     }
 }
+
+#[test]
+fn test_stress_bucketed_pagination_no_unbounded_vectors() {
+    let fx = setup();
+    let client = AidContractClient::new(&fx.env, &fx.contract_id);
+
+    // Create 125 aids (50 in page 0, 50 in page 1, 25 in page 2)
+    let ids = create_aids(&fx.env, &client, &fx.donor, &fx.recipient, 125);
+    assert_eq!(ids.len(), 125);
+
+    fx.env.as_contract(&fx.contract_id, || {
+        // Donor aids pagination checks
+        let donor_count = storage::get_donor_aid_count(&fx.env, &fx.donor);
+        assert_eq!(donor_count, 125);
+
+        let page0 = storage::get_donor_aids_page(&fx.env, &fx.donor, 0);
+        let page1 = storage::get_donor_aids_page(&fx.env, &fx.donor, 1);
+        let page2 = storage::get_donor_aids_page(&fx.env, &fx.donor, 2);
+        let page3 = storage::get_donor_aids_page(&fx.env, &fx.donor, 3);
+
+        assert_eq!(page0.len(), 50);
+        assert_eq!(page1.len(), 50);
+        assert_eq!(page2.len(), 25);
+        assert_eq!(page3.len(), 0);
+
+        let all_donor_aids = storage::get_donor_aids(&fx.env, &fx.donor);
+        assert_eq!(all_donor_aids.len(), 125);
+
+        // Recipient aids pagination checks
+        let recipient_count = storage::get_recipient_aid_count(&fx.env, &fx.recipient);
+        assert_eq!(recipient_count, 125);
+
+        let r_page0 = storage::get_recipient_aids_page(&fx.env, &fx.recipient, 0);
+        let r_page1 = storage::get_recipient_aids_page(&fx.env, &fx.recipient, 1);
+        let r_page2 = storage::get_recipient_aids_page(&fx.env, &fx.recipient, 2);
+        let r_page3 = storage::get_recipient_aids_page(&fx.env, &fx.recipient, 3);
+
+        assert_eq!(r_page0.len(), 50);
+        assert_eq!(r_page1.len(), 50);
+        assert_eq!(r_page2.len(), 25);
+        assert_eq!(r_page3.len(), 0);
+
+        let all_recipient_aids = storage::get_recipient_aids(&fx.env, &fx.recipient);
+        assert_eq!(all_recipient_aids.len(), 125);
+
+        // Search index bucketing checks
+        let mut index_vec = soroban_sdk::Vec::new(&fx.env);
+        for id in 0..125u64 {
+            index_vec.push_back(id);
+        }
+        storage::set_search_index(&fx.env, &index_vec);
+
+        let search_count = storage::get_search_index_count(&fx.env);
+        assert_eq!(search_count, 125);
+
+        let s_page0 = storage::get_search_index_page(&fx.env, 0);
+        let s_page1 = storage::get_search_index_page(&fx.env, 1);
+        let s_page2 = storage::get_search_index_page(&fx.env, 2);
+
+        assert_eq!(s_page0.len(), 50);
+        assert_eq!(s_page1.len(), 50);
+        assert_eq!(s_page2.len(), 25);
+
+        let all_search = storage::get_search_index(&fx.env);
+        assert_eq!(all_search.len(), 125);
+    });
+}
+
