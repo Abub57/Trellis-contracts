@@ -203,6 +203,12 @@ and every adapter response is reproducible from `deterministic_seed`. See
 [`docs/SANDBOX.md`](../docs/SANDBOX.md) for guardrails, fixtures, and
 limitations.
 
+Run the focused synthetic happy-path monitor with
+`cargo run -p testing --bin synthetic-journey-monitor`. It reports workflow
+latency and names the failing sandbox adapter if the fund/quote/settle journey
+fails. See [`docs/SYNTHETIC_JOURNEY_MONITOR.md`](../docs/SYNTHETIC_JOURNEY_MONITOR.md)
+for output fields, scope, and recovery guidance.
+
 ## Simulation & Gas Profiling
 
 Run deterministic simulations of complex scenarios:
