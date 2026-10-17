@@ -81,8 +81,10 @@ pub use compat::{
     MIN_SUPPORTED_RECORD_SCHEMA_VERSION, RECORD_SCHEMA_V1, RECORD_SCHEMA_V2,
 };
 pub use config::{
-    validate_feature_flag, validate_full_config, validate_network_id, validate_rpc_url,
-    validate_secret_key, Environment, RedactedSecret,
+    validate_account_id, validate_contract_id, validate_feature_flag, validate_full_config,
+    validate_network_id, validate_network_rpc_consistency, validate_rpc_url, validate_secret_key,
+    AidSettings, CrossEnvConfigBundle, Environment, GovernanceSettings, MarketplaceSettings,
+    ModuleContractIds, OracleSettings, RedactedSecret, ReferralSettings, TreasurySettings,
 };
 pub use domain_events::{consumer_version, publish_event, validate_event, DomainEvent, EventSchema,
     EventValidationError};

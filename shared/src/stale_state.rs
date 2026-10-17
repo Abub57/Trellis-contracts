@@ -1,8 +1,5 @@
 //! Cross-source stale-state detection for irreversible workflows (issue #111).
 
-use soroban_sdk::contracttype;
-
-#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StateSnapshot {
     pub wallet_revision: u64,
@@ -10,15 +7,12 @@ pub struct StateSnapshot {
     pub ledger_sequence: u32,
 }
 
-#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaleStateReason { WalletChanged, ApiChanged, LedgerAdvanced }
 
-#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryAction { RefreshWallet, RefreshApi, ReSimulate, RestartFlow }
 
-#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaleStateReport {
     pub stale: bool,
