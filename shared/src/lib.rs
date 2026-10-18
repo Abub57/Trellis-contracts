@@ -16,7 +16,6 @@ pub mod dashboard;
 pub mod degradation;
 pub mod diagnostics;
 pub mod disclosure;
-pub mod duplicate_detection;
 pub mod error_taxonomy;
 pub mod errors;
 pub mod events;
@@ -122,13 +121,6 @@ FailureSeverity, FailureState, HealthCategory, OperationType, PartialFailure,
 RedactedDeadLetter, RedactedPartialFailure,
 };
 pub use disclosure::{DetailField, DetailSeverity, TransactionDetail, TransactionDetailBuilder};
-pub use duplicate_detection::{
-    approve_merge, cancel_merge, detect_candidates, execute_merge, get_merge_review,
-    list_merge_reviews, reject_merge, revert_merge, submit_merge_review, CandidateDuplicate,
-    DuplicateDetectionConfig, DuplicateDetectionError, DuplicateMatchReason, MergeAction,
-    MergeAuditEntry, MergeDecision, MergeReview, MergeReviewStatus, MergeRevertReport,
-    DETECTION_SCHEMA_VERSION, MAX_CANDIDATES_PER_SCAN,
-};
 pub use error_taxonomy::{describe_error, ErrorCategory, ErrorDomain, ErrorInfo};
 pub use errors::Error;
 pub use export::{
@@ -241,7 +233,19 @@ check_and_consume, get_quota_config, get_quota_status, get_usage, reset_quota,
 set_quota_config, QuotaConfig, QuotaStatus, QuotaUsage,
 };
 pub use reconciliation::{
-run_reconciliation, DriftItem, DriftType, ReconciliationReport, SourceRecord,
+    execute_projection_repairs, reconcile_aid_storage, reconcile_governance_storage,
+    reconcile_marketplace_storage, reconcile_oracle_storage, reconcile_referral_storage,
+    reconcile_treasury_storage, run_paginated_projection_reconciliation,
+    run_projection_reconciliation, run_reconciliation, DriftItem, DriftType,
+    PaginatedReconciliationResult, PaginationParams, ProjectionDriftItem, ProjectionDriftKind,
+    ProjectionReconciliationReport, ProjectionRepairInstruction, ProjectionRepairReceipt,
+    ReconciliationError, ReconciliationModule, ReconciliationReport, ReconciliationScopeConfig,
+    ReconciliationSeverity, SourceRecord, AID_COUNTER, AID_DONOR_CNT, AID_DONOR_PAGE,
+    AID_RCP_CNT, AID_RCP_PAGE, AID_RECORD, AID_SEARCH_CNT, AID_SEARCH_PAGE, GOV_ADMIN_CNT,
+    GOV_ADMIN_SET, GOV_APPROVAL, GOV_PROPOSAL, MKT_CANONICAL_AUCTION, MKT_CANONICAL_LISTING,
+    MKT_COLL_AUCTIONS, MKT_COLL_LISTINGS, ORACLE_LATEST_CNT, ORACLE_LATEST_PRICE,
+    ORACLE_LATEST_TS, ORACLE_SUBMISSIONS, REF_ACCRUED, REF_ADDR, REF_CODE, REF_LIFETIME,
+    TREASURY_STRAT_LST, TREASURY_STRAT_OK, TREASURY_STRAT_POS, TREASURY_STRAT_TOT,
 };
 pub use recovery::{
 abandon, complete_step, diagnostics, fail_step, is_stuck, next_action, open_operation, resume,
@@ -321,8 +325,6 @@ mod test_auth;
 mod test_client;
 #[cfg(test)]
 mod test_disclosure;
-#[cfg(test)]
-mod test_duplicate_detection;
 #[cfg(test)]
 mod test_import;
 #[cfg(test)]

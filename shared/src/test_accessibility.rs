@@ -21,7 +21,7 @@ mod tests {
         let return_target = symbol_short!("tx_btn");
 
         // 1. Idle
-        let a11y_idle = map_state_to_accessibility(AsyncStatusState::Idle, return_target);
+        let a11y_idle = map_state_to_accessibility(AsyncStatusState::Idle, return_target.clone());
         assert_eq!(a11y_idle.state, AsyncStatusState::Idle);
         assert_eq!(a11y_idle.aria_live, AriaLiveMode::Off);
         assert!(!a11y_idle.aria_busy);
@@ -29,14 +29,14 @@ mod tests {
         assert!(!a11y_idle.focus_trap.trap_active);
 
         // 2. Validating
-        let a11y_val = map_state_to_accessibility(AsyncStatusState::Validating, return_target);
+        let a11y_val = map_state_to_accessibility(AsyncStatusState::Validating, return_target.clone());
         assert_eq!(a11y_val.state, AsyncStatusState::Validating);
         assert_eq!(a11y_val.aria_live, AriaLiveMode::Polite);
         assert!(a11y_val.aria_busy);
         assert_eq!(a11y_val.role, AriaRole::Progressbar);
 
         // 3. AwaitingSignature
-        let a11y_sig = map_state_to_accessibility(AsyncStatusState::AwaitingSignature, return_target);
+        let a11y_sig = map_state_to_accessibility(AsyncStatusState::AwaitingSignature, return_target.clone());
         assert_eq!(a11y_sig.state, AsyncStatusState::AwaitingSignature);
         assert_eq!(a11y_sig.aria_live, AriaLiveMode::Polite);
         assert!(a11y_sig.aria_busy);
@@ -44,7 +44,7 @@ mod tests {
         assert!(a11y_sig.focus_trap.trap_active);
 
         // 4. Broadcasting
-        let a11y_broad = map_state_to_accessibility(AsyncStatusState::Broadcasting, return_target);
+        let a11y_broad = map_state_to_accessibility(AsyncStatusState::Broadcasting, return_target.clone());
         assert_eq!(a11y_broad.state, AsyncStatusState::Broadcasting);
         assert!(a11y_broad.aria_busy);
         assert_eq!(a11y_broad.role, AriaRole::Progressbar);
@@ -76,7 +76,7 @@ mod tests {
         let return_target = symbol_short!("retry_btn");
 
         // Recoverable error: assertive alert, dismissable modal
-        let a11y_recover = map_state_to_accessibility(AsyncStatusState::RecoverableError, return_target);
+        let a11y_recover = map_state_to_accessibility(AsyncStatusState::RecoverableError, return_target.clone());
         assert_eq!(a11y_recover.aria_live, AriaLiveMode::Assertive);
         assert_eq!(a11y_recover.role, AriaRole::Alert);
         assert!(a11y_recover.focus_trap.dismissable);
