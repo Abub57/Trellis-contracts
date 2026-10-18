@@ -59,6 +59,16 @@ pub mod time_window;
 pub mod utils;
 pub mod webhook;
 // Re-export the most commonly-needed items at crate root for ergonomic use.
+pub use abuse::{
+    assess_high_impact_abuse, evaluate_high_impact_abuse, get_abuse_policy, get_abuse_state,
+    is_abuse_blocked, record_abuse, set_abuse_policy, AbusePolicy, AbuseState,
+    HighImpactAbuseContext,
+};
+pub use risk_scoring::{
+    assess_and_record, evaluate_risk, get_actor_profile, get_risk_policy, reset_actor_risk,
+    set_actor_exemption, set_risk_policy, ActionContext, ActorRiskProfile, HighImpactAction,
+    RiskAssessment, RiskError, RiskFactor, RiskFactorType, RiskPolicy, RiskTier, RiskVerdict,
+};
 pub use audit_ledger::{
 append_event, append_financial, append_privileged, checkpoint, entry_hash, export_digest,
 export_ledger, genesis_hash, get_entry, head, length, publish_head_checkpoint, verify_chain,
