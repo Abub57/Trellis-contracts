@@ -37,6 +37,7 @@ pub mod operational_metadata;
 pub mod pagination;
 pub mod payments;
 pub mod policy;
+pub mod policy_preview;
 pub mod preflight;
 pub mod public_status;
 pub mod projection_repair;
@@ -324,6 +325,14 @@ pub use degradation::{
     FallbackDecision, FallbackStrategy, RecoveryReceipt, TOPIC_DEGRADATION, TOPIC_FALLBACK,
     TOPIC_RECOVERY,
 };
+pub use policy_preview::{
+    commit_policy_change, default_policy_parameters, get_active_policy, get_simulation_preview,
+    rollback_policy_change, set_active_policy, simulate_policy_preview, validate_parameters,
+    validate_preview_for_commit, ExpectedSideEffectKind, PolicyImpactSeverity, PolicyModule,
+    PolicyParameters, PolicySimulationError, PolicySimulationPreview, PolicyType,
+    ProposedPolicyChange, RollbackConstraintReport, SideEffectSummary, DEFAULT_PREVIEW_VALIDITY_LEDGERS,
+    TOPIC_POLICY_COMMIT, TOPIC_POLICY_ROLLBACK, TOPIC_POLICY_SIMULATION,
+};
 pub use utils::{is_expired, now};
 #[cfg(test)]
 mod test_reconciliation;
@@ -351,6 +360,8 @@ mod test_accessibility;
 mod test_degradation;
 #[cfg(test)]
 mod test_diagnostics;
+#[cfg(test)]
+mod test_policy_preview;
 #[cfg(test)]
 mod test_risk_scoring;
 #[cfg(test)]

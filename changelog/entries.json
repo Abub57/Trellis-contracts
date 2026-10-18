@@ -169,5 +169,14 @@
     "migration_notes": "",
     "issue": 242,
     "pr": null
+  },
+  {
+    "version": "unreleased",
+    "date": "2026-10-18",
+    "impact": "compatible",
+    "summary": "Implemented policy simulation preview framework before committing irreversible or high-impact changes, previewing affected records and users, expected operational side effects, and rollback constraints in shared::policy_preview (Issue #250).",
+    "migration_notes": "",
+    "issue": 250,
+    "pr": null
   }
 ]
