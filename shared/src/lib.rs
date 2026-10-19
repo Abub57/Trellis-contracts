@@ -132,7 +132,11 @@ FailureSeverity, FailureState, HealthCategory, OperationType, PartialFailure,
 RedactedDeadLetter, RedactedPartialFailure,
 };
 pub use disclosure::{DetailField, DetailSeverity, TransactionDetail, TransactionDetailBuilder};
-pub use error_taxonomy::{describe_error, ErrorCategory, ErrorDomain, ErrorInfo};
+pub use error_taxonomy::{
+    describe_error, problem_details, remediation_hint, ErrorCategory, ErrorDomain, ErrorInfo,
+    ProblemDetails, ProblemDetailsCode, ProblemDetailsRegistry, ProblemDetailsSpec,
+    PROBLEM_DETAILS_SCHEMA_VERSION,
+};
 pub use errors::Error;
 pub use export::{
 authorize_export, authorize_module_export, cancel_export_stream, create_export,
