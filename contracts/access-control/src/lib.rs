@@ -58,9 +58,52 @@ pub enum AccessControlError {
     RateLimitExceeded = 212,
     AlreadyInitialized = 213,
     AuditFailed = 214,
+    /// The requested operation is currently paused by the circuit breaker.
+    OperationPaused = 215,
+    /// The pause scope is not recognised.
+    InvalidPauseScope = 216,
+    /// The operation is not currently paused.
+    NotPaused = 217,
+    /// No pending ownership transfer exists.
+    NoPendingTransfer = 218,
+    /// The pending ownership transfer has expired.
+    TransferExpired = 219,
+    /// Caller is not the designated pending owner.
+    NotPendingOwner = 220,
+    /// An ownership transfer is already pending.
+    TransferAlreadyPending = 221,
+    /// Invalid expiry timestamp.
+    InvalidExpiry = 222,
+    /// The requested role-grant duration is zero or otherwise invalid.
+    InvalidDuration = 223,
 }
 
 type ContractResult<T> = core::result::Result<T, AccessControlError>;
+
+/// Pause scopes recognised by the emergency circuit breaker.  Each scope
+/// maps to an operation family so that pausing one family does not disable
+/// safe reads or unrelated flows.
+const PAUSE_SCOPE_ROLES: Symbol = symbol_short!("roles");
+const PAUSE_SCOPE_ADMINS: Symbol = symbol_short!("admins");
+const PAUSE_SCOPE_INVITES: Symbol = symbol_short!("invites");
+
+fn is_valid_pause_scope(scope: &Symbol) -> bool {
+    *scope == PAUSE_SCOPE_ROLES || *scope == PAUSE_SCOPE_ADMINS || *scope == PAUSE_SCOPE_INVITES
+}
+
+/// Fail with [`AccessControlError::OperationPaused`] when `scope` is paused.
+#[allow(dead_code)]
+fn require_not_paused(env: &Env, scope: Symbol) -> ContractResult<()> {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::PausedScope(scope))
+        .unwrap_or(false)
+    {
+        return Err(AccessControlError::OperationPaused);
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -77,7 +120,7 @@ enum DataKey {
     RoleParent(Symbol),
     /// Whether a role name has been registered: `role -> bool`.
     RoleExists(Symbol),
-    /// Membership entry: `(role, member) -> bool`.
+    /// Membership entry: `(role, member) -> RoleGrant`.
     RoleMember(Symbol, Address),
     /// Direct members ever seen for a role, used for off-chain enumeration.
     RoleMemberList(Symbol),
@@ -87,6 +130,14 @@ enum DataKey {
     InviteCount(Address),
     /// Track last invite time per inviter: `inviter -> u64`
     LastInviteTime(Address),
+    /// Whether a pause scope is currently active: `scope -> bool`.
+    PausedScope(Symbol),
+    /// Address that most recently paused a scope: `scope -> Address`.
+    PausedBy(Symbol),
+    /// Ledger timestamp when a scope was paused: `scope -> u64`.
+    PausedAt(Symbol),
+    /// Pending super-admin transfer: `PendingOwnershipTransfer`
+    PendingSuperAdmin,
 }
 
 #[contracttype]
@@ -95,6 +146,46 @@ pub struct Invitation {
     pub inviter: Address,
     pub role: Symbol,
     pub expires_at: u64,
+}
+
+/// A role membership entry.  `active` is the soft-delete flag `revoke_role`
+/// already used; `expires_at` optionally bounds the grant in time so that
+/// [`AccessControlContract::has_role`] treats it as inactive once the ledger
+/// timestamp passes it, without requiring a separate revocation transaction.
+/// `expires_at: None` is a permanent grant, unaffected by expiration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleGrant {
+    pub active: bool,
+    pub expires_at: Option<u64>,
+}
+
+impl RoleGrant {
+    fn permanent() -> Self {
+        Self {
+            active: true,
+            expires_at: None,
+        }
+    }
+
+    fn timed(expires_at: u64) -> Self {
+        Self {
+            active: true,
+            expires_at: Some(expires_at),
+        }
+    }
+
+    fn revoked() -> Self {
+        Self {
+            active: false,
+            expires_at: None,
+        }
+    }
+
+    /// `true` when the grant is active and, if time-bounded, not yet expired.
+    fn is_in_effect(&self, now: u64) -> bool {
+        self.active && self.expires_at.map_or(true, |expires_at| now <= expires_at)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +201,11 @@ const EV_ADMIN_REMOVED: Symbol = symbol_short!("ac_ar");
 const EV_INVITE_CREATED: Symbol = symbol_short!("ac_ic");
 const EV_INVITE_ACCEPTED: Symbol = symbol_short!("ac_ia");
 const EV_INVITE_REVOKED: Symbol = symbol_short!("ac_ir");
+const EV_PAUSED: Symbol = symbol_short!("ac_pz");
+const EV_RESUMED: Symbol = symbol_short!("ac_rz");
+const EV_OWNERSHIP_TRANSFER_PROPOSED: Symbol = symbol_short!("ac_op");
+const EV_OWNERSHIP_TRANSFER_ACCEPTED: Symbol = symbol_short!("ac_oa");
+const EV_OWNERSHIP_TRANSFER_CANCELLED: Symbol = symbol_short!("ac_oc");
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -169,6 +265,105 @@ impl AccessControlContract {
     }
 
     // -----------------------------------------------------------------------
+    // Emergency circuit breaker
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` when the given pause scope is currently active.
+    pub fn is_paused(env: Env, scope: Symbol) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::PausedScope(scope))
+            .unwrap_or(false)
+    }
+
+    /// Pause a scoped operation family.  Only admins may call this.
+    ///
+    /// # Authorization
+    /// Requires the `ManageMaintainers` action permission.  Unauthorized
+    /// callers receive [`AccessControlError::NotAdmin`].  Unknown scopes
+    /// yield [`AccessControlError::InvalidPauseScope`].
+    pub fn pause(env: Env, caller: Address, scope: Symbol) -> Result<(), AccessControlError> {
+        require_action(&env, &caller, &Action::ManageMaintainers)?;
+        if !is_valid_pause_scope(&scope) {
+            return Err(AccessControlError::InvalidPauseScope);
+        }
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::PausedScope(scope.clone()))
+            .unwrap_or(false)
+        {
+            return Err(AccessControlError::OperationPaused);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedScope(scope.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedBy(scope.clone()), &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedAt(scope.clone()), &env.ledger().timestamp());
+        record_access_audit(
+            &env,
+            &caller,
+            TimelineEventType::ConfigChanged,
+            symbol_short!("pause"),
+            symbol_short!("breaker"),
+            None,
+            Some(scope.clone()),
+            Some(0),
+            Some(1),
+        )?;
+        env.events().publish((EV_PAUSED,), (caller, scope));
+        Ok(())
+    }
+
+    /// Resume a previously paused scope.  Only admins may call this.
+    ///
+    /// # Authorization
+    /// Requires the `ManageMaintainers` action permission.  Unauthorized
+    /// callers receive [`AccessControlError::NotAdmin`].  Unknown scopes
+    /// yield [`AccessControlError::InvalidPauseScope`].  Scopes that are not
+    /// currently paused yield [`AccessControlError::NotPaused`].
+    pub fn resume(env: Env, caller: Address, scope: Symbol) -> Result<(), AccessControlError> {
+        require_action(&env, &caller, &Action::ManageMaintainers)?;
+        if !is_valid_pause_scope(&scope) {
+            return Err(AccessControlError::InvalidPauseScope);
+        }
+        if !env
+            .storage()
+            .instance()
+            .get(&DataKey::PausedScope(scope.clone()))
+            .unwrap_or(false)
+        {
+            return Err(AccessControlError::NotPaused);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedScope(scope.clone()), &false);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PausedBy(scope.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PausedAt(scope.clone()));
+        record_access_audit(
+            &env,
+            &caller,
+            TimelineEventType::ConfigChanged,
+            symbol_short!("resume"),
+            symbol_short!("breaker"),
+            None,
+            Some(scope.clone()),
+            Some(1),
+            Some(0),
+        )?;
+        env.events().publish((EV_RESUMED,), (caller, scope));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Admin management
     // -----------------------------------------------------------------------
 
@@ -207,6 +402,10 @@ impl AccessControlContract {
     }
 
     /// Add a new admin.  Only existing admins may call this.
+    ///
+    /// # Authorization
+    /// Requires the `ManageMaintainers` action permission.  Unauthorized
+    /// callers receive [`AccessControlError::NotAdmin`].
     pub fn add_admin(
         env: Env,
         caller: Address,
@@ -267,6 +466,12 @@ impl AccessControlContract {
 
     /// Remove an admin.  Only existing admins may call this.  The super-admin
     /// cannot be removed.
+    ///
+    /// # Authorization
+    /// Requires the `ManageMaintainers` action permission.  Unauthorized
+    /// callers receive [`AccessControlError::NotAdmin`].  The super-admin
+    /// address cannot be removed and yields
+    /// [`AccessControlError::CannotRemoveSuperAdmin`].
     pub fn remove_admin(
         env: Env,
         caller: Address,
@@ -318,10 +523,211 @@ impl AccessControlContract {
     }
 
     // -----------------------------------------------------------------------
+    // Ownership transfer (Issue #150)
+    // -----------------------------------------------------------------------
+
+    /// Propose a transfer of the super-admin role to `target_owner` with an `expiry` timestamp.
+    /// Only the current super-admin may call this.
+    ///
+    /// # Authorization
+    /// Requires the `TransferOwnership` action permission and caller must be current super-admin.
+    pub fn transfer_ownership(
+        env: Env,
+        caller: Address,
+        target_owner: Address,
+        expiry: u64,
+    ) -> Result<(), AccessControlError> {
+        require_action(&env, &caller, &Action::TransferOwnership)?;
+
+        let super_admin_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuperAdmin)
+            .expect("contract not initialised");
+
+        if caller != super_admin_addr {
+            return Err(AccessControlError::NotAdmin);
+        }
+
+        if target_owner == super_admin_addr {
+            return Err(AccessControlError::SelfReference);
+        }
+
+        let now = env.ledger().timestamp();
+        if expiry <= now {
+            return Err(AccessControlError::InvalidExpiry);
+        }
+
+        if let Some(existing) = env
+            .storage()
+            .instance()
+            .get::<DataKey, shared::auth::PendingOwnershipTransfer>(&DataKey::PendingSuperAdmin)
+        {
+            if now <= existing.expiry {
+                return Err(AccessControlError::TransferAlreadyPending);
+            }
+        }
+
+        let pending = shared::auth::PendingOwnershipTransfer {
+            current_owner: caller.clone(),
+            target_owner: target_owner.clone(),
+            expiry,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingSuperAdmin, &pending);
+
+        record_access_audit(
+            &env,
+            &caller,
+            TimelineEventType::RoleChanged,
+            symbol_short!("own_prop"),
+            symbol_short!("transfer"),
+            Some(target_owner.clone()),
+            Some(symbol_short!("super")),
+            Some(0),
+            Some(1),
+        )?;
+
+        env.events().publish(
+            (EV_OWNERSHIP_TRANSFER_PROPOSED,),
+            (caller, target_owner, expiry),
+        );
+        Ok(())
+    }
+
+    /// Accept a pending ownership transfer. Caller must be the designated `target_owner`.
+    pub fn accept_ownership(env: Env, caller: Address) -> Result<(), AccessControlError> {
+        caller.require_auth();
+
+        let pending: shared::auth::PendingOwnershipTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingSuperAdmin)
+            .ok_or(AccessControlError::NoPendingTransfer)?;
+
+        if caller != pending.target_owner {
+            return Err(AccessControlError::NotPendingOwner);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > pending.expiry {
+            env.storage().instance().remove(&DataKey::PendingSuperAdmin);
+            return Err(AccessControlError::TransferExpired);
+        }
+
+        env.storage().instance().remove(&DataKey::PendingSuperAdmin);
+
+        let old_super = pending.current_owner;
+        let new_super = caller.clone();
+
+        // 1. Update super-admin address
+        env.storage()
+            .instance()
+            .set(&DataKey::SuperAdmin, &new_super);
+
+        // 2. Ensure new super-admin is in admins map
+        let mut admins: Map<Address, bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admins)
+            .unwrap_or_else(|| Map::new(&env));
+        admins.set(new_super.clone(), true);
+        env.storage().instance().set(&DataKey::Admins, &admins);
+
+        // 3. Grant super role to new super-admin and revoke from old
+        grant_role_internal(&env, &symbol_short!("super"), &new_super);
+        revoke_role_internal(&env, &symbol_short!("super"), &old_super);
+
+        // 4. Update shared auth admin
+        shared::auth::set_admin(&env, &new_super);
+        shared::storage::persistent_set(
+            &env,
+            &shared::auth::DataKey::Role(new_super.clone(), shared::auth::Role::Admin),
+            &true,
+        );
+
+        record_access_audit(
+            &env,
+            &new_super,
+            TimelineEventType::RoleChanged,
+            symbol_short!("own_acpt"),
+            symbol_short!("transfer"),
+            Some(new_super.clone()),
+            Some(symbol_short!("super")),
+            Some(0),
+            Some(1),
+        )?;
+
+        env.events()
+            .publish((EV_OWNERSHIP_TRANSFER_ACCEPTED,), (old_super, new_super));
+        Ok(())
+    }
+
+    /// Cancel a pending ownership transfer. Caller must be the current super-admin.
+    pub fn cancel_ownership_transfer(env: Env, caller: Address) -> Result<(), AccessControlError> {
+        require_action(&env, &caller, &Action::CancelOwnershipTransfer)?;
+
+        let super_admin_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuperAdmin)
+            .expect("contract not initialised");
+
+        if caller != super_admin_addr {
+            return Err(AccessControlError::NotAdmin);
+        }
+
+        let pending: shared::auth::PendingOwnershipTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingSuperAdmin)
+            .ok_or(AccessControlError::NoPendingTransfer)?;
+
+        env.storage().instance().remove(&DataKey::PendingSuperAdmin);
+
+        record_access_audit(
+            &env,
+            &caller,
+            TimelineEventType::RoleChanged,
+            symbol_short!("own_canc"),
+            symbol_short!("transfer"),
+            Some(pending.target_owner.clone()),
+            Some(symbol_short!("super")),
+            Some(1),
+            Some(0),
+        )?;
+
+        env.events().publish(
+            (EV_OWNERSHIP_TRANSFER_CANCELLED,),
+            (caller, pending.target_owner),
+        );
+        Ok(())
+    }
+
+    /// Return the currently pending ownership transfer, if any and not expired.
+    pub fn get_pending_ownership(env: Env) -> Option<shared::auth::PendingOwnershipTransfer> {
+        let pending = env
+            .storage()
+            .instance()
+            .get::<DataKey, shared::auth::PendingOwnershipTransfer>(&DataKey::PendingSuperAdmin)?;
+        if env.ledger().timestamp() > pending.expiry {
+            None
+        } else {
+            Some(pending)
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Role creation
     // -----------------------------------------------------------------------
 
     /// Create a new role.  Admin-gated.
+    ///
+    /// # Authorization
+    /// Requires the `ConfigureRoleRegistry` action permission.  Unauthorized
+    /// callers receive [`AccessControlError::NotAdmin`].
     pub fn create_role(env: Env, caller: Address, role: Symbol) -> Result<(), AccessControlError> {
         require_action(&env, &caller, &Action::ConfigureRoleRegistry)?;
 
@@ -477,9 +883,69 @@ impl AccessControlContract {
     }
 
     /// Returns `true` if `user` holds `role`, either directly or via an
-    /// ancestor in the hierarchy.
+    /// ancestor in the hierarchy. A time-bounded direct grant is treated as
+    /// inactive once the ledger timestamp passes its expiration — no
+    /// separate revocation call is required.
     pub fn has_role(env: Env, role: Symbol, user: Address) -> bool {
         has_role_recursive(&env, &role, &user)
+    }
+
+    /// Grant `role` to `user` for `duration_seconds`, measured from the
+    /// current ledger timestamp.  Admin-gated, same authorization as
+    /// [`Self::grant_role`].
+    ///
+    /// Once the ledger timestamp passes the computed expiration,
+    /// [`Self::has_role`] automatically returns `false` for this grant with
+    /// no further transaction required. Permanent grants remain available
+    /// via [`Self::grant_role`], which stores `expires_at: None`.
+    pub fn grant_role_timed(
+        env: Env,
+        caller: Address,
+        role: Symbol,
+        account: Address,
+        duration_seconds: u64,
+    ) -> Result<(), AccessControlError> {
+        require_action(&env, &caller, &Action::AssignRoles)?;
+
+        ensure_role_exists(&env, &role)?;
+
+        if duration_seconds == 0 {
+            return Err(AccessControlError::InvalidDuration);
+        }
+
+        let expires_at = env
+            .ledger()
+            .timestamp()
+            .checked_add(duration_seconds)
+            .ok_or(AccessControlError::InvalidDuration)?;
+
+        let was_member = has_direct_role(&env, &role, &account);
+        grant_role_timed_internal(&env, &role, &account, expires_at);
+        record_access_audit(
+            &env,
+            &caller,
+            TimelineEventType::RoleChanged,
+            symbol_short!("role_grt"),
+            symbol_short!("timed"),
+            Some(account.clone()),
+            Some(role.clone()),
+            Some(if was_member { 1 } else { 0 }),
+            Some(1),
+        )?;
+
+        env.events()
+            .publish((EV_ROLE_GRANTED,), (role, account, caller, expires_at));
+        Ok(())
+    }
+
+    /// Returns the expiration ledger timestamp for `user`'s direct grant of
+    /// `role`, if any grant record exists. `None` when no grant has ever
+    /// been recorded, or when the recorded grant is permanent
+    /// (`expires_at: None`). The returned timestamp may already be in the
+    /// past — callers wanting to know current membership should use
+    /// [`Self::has_role`] instead, which already accounts for expiration.
+    pub fn get_role_expiration(env: Env, role: Symbol, account: Address) -> Option<u64> {
+        role_grant(&env, &role, &account).and_then(|grant| grant.expires_at)
     }
 
     // -----------------------------------------------------------------------
@@ -503,29 +969,41 @@ impl AccessControlContract {
 
         // Rate limiting
         let current_time = env.ledger().timestamp();
-        let last_time = env.storage().instance().get(&DataKey::LastInviteTime(caller.clone())).unwrap_or(0u64);
-        let mut count: u32 = env.storage().instance().get(&DataKey::InviteCount(caller.clone())).unwrap_or(0);
-        
+        let last_time = env
+            .storage()
+            .instance()
+            .get(&DataKey::LastInviteTime(caller.clone()))
+            .unwrap_or(0u64);
+        let mut count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InviteCount(caller.clone()))
+            .unwrap_or(0);
+
         // Reset count if more than 1 hour passed
         if current_time > last_time + 3600 {
             count = 0;
         }
-        
+
         if count >= 10 {
             return Err(AccessControlError::RateLimitExceeded);
         }
-        
-        env.storage().instance().set(&DataKey::LastInviteTime(caller.clone()), &current_time);
-        env.storage().instance().set(&DataKey::InviteCount(caller.clone()), &(count + 1));
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LastInviteTime(caller.clone()), &current_time);
+        env.storage()
+            .instance()
+            .set(&DataKey::InviteCount(caller.clone()), &(count + 1));
 
         let expires_at = current_time + ttl_ledgers; // ttl_ledgers here acts as time in seconds for simplicity
-        
+
         let inv = Invitation {
             inviter: caller.clone(),
             role: role.clone(),
             expires_at,
         };
-        
+
         let invitation_key = DataKey::Invitation(invitee.clone(), role.clone());
         let invitation_exists = env.storage().instance().has(&invitation_key);
         env.storage().instance().set(&invitation_key, &inv);
@@ -540,7 +1018,8 @@ impl AccessControlContract {
             Some(if invitation_exists { 1 } else { 0 }),
             Some(1),
         )?;
-        env.events().publish((EV_INVITE_CREATED,), (caller, invitee, role));
+        env.events()
+            .publish((EV_INVITE_CREATED,), (caller, invitee, role));
         Ok(())
     }
 
@@ -551,7 +1030,7 @@ impl AccessControlContract {
         role: Symbol,
     ) -> Result<(), AccessControlError> {
         caller.require_auth();
-        
+
         let key = DataKey::Invitation(caller.clone(), role.clone());
         if let Some(inv) = env.storage().instance().get::<DataKey, Invitation>(&key) {
             let current_time = env.ledger().timestamp();
@@ -559,7 +1038,7 @@ impl AccessControlContract {
                 env.storage().instance().remove(&key);
                 return Err(AccessControlError::InvitationExpired);
             }
-            
+
             let was_member = has_direct_role(&env, &role, &caller);
             grant_role_internal(&env, &role, &caller);
             env.storage().instance().remove(&key);
@@ -574,8 +1053,9 @@ impl AccessControlContract {
                 Some(if was_member { 1 } else { 0 }),
                 Some(1),
             )?;
-            
-            env.events().publish((EV_INVITE_ACCEPTED,), (caller.clone(), role.clone()));
+
+            env.events()
+                .publish((EV_INVITE_ACCEPTED,), (caller.clone(), role.clone()));
             Ok(())
         } else {
             Err(AccessControlError::InvitationNotFound)
@@ -592,7 +1072,11 @@ impl AccessControlContract {
         let key = DataKey::Invitation(invitee.clone(), role.clone());
         if let Some(inv) = env.storage().instance().get::<DataKey, Invitation>(&key) {
             // Owner-scoped: a maintainer, or the original inviter, may cancel.
-            require_action(&env, &caller, &Action::CancelInvitation(inv.inviter.clone()))?;
+            require_action(
+                &env,
+                &caller,
+                &Action::CancelInvitation(inv.inviter.clone()),
+            )?;
 
             env.storage().instance().remove(&key);
             record_access_audit(
@@ -606,7 +1090,8 @@ impl AccessControlContract {
                 Some(1),
                 Some(0),
             )?;
-            env.events().publish((EV_INVITE_REVOKED,), (caller, invitee, role));
+            env.events()
+                .publish((EV_INVITE_REVOKED,), (caller, invitee, role));
             Ok(())
         } else {
             Err(AccessControlError::InvitationNotFound)
@@ -723,11 +1208,25 @@ fn ensure_role_exists(env: &Env, role: &Symbol) -> ContractResult<()> {
     }
 }
 
-/// Grant `role` to `user` — writes the membership entry.
+/// Grant `role` to `user` permanently — writes the membership entry with no
+/// expiration.
 fn grant_role_internal(env: &Env, role: &Symbol, user: &Address) {
+    write_role_grant(env, role, user, RoleGrant::permanent());
+}
+
+/// Grant `role` to `user` until `expires_at` (a ledger timestamp in seconds).
+/// [`has_role`] automatically treats the grant as inactive once the ledger
+/// timestamp passes `expires_at`, without a separate revocation call.
+fn grant_role_timed_internal(env: &Env, role: &Symbol, user: &Address, expires_at: u64) {
+    write_role_grant(env, role, user, RoleGrant::timed(expires_at));
+}
+
+/// Writes `grant` for `(role, user)` and tracks `user` in the role's member
+/// list for off-chain enumeration.
+fn write_role_grant(env: &Env, role: &Symbol, user: &Address, grant: RoleGrant) {
     env.storage()
         .instance()
-        .set(&DataKey::RoleMember(role.clone(), user.clone()), &true);
+        .set(&DataKey::RoleMember(role.clone(), user.clone()), &grant);
 
     let mut members: Vec<Address> = env
         .storage()
@@ -749,11 +1248,11 @@ fn has_direct_role(env: &Env, role: &Symbol, user: &Address) -> bool {
     role_member(env, role, user)
 }
 
-/// Revoke `role` from `user` — sets membership to false (soft-delete).
+/// Revoke `role` from `user` — sets membership to inactive (soft-delete).
 fn revoke_role_internal(env: &Env, role: &Symbol, user: &Address) {
     env.storage()
         .instance()
-        .set(&DataKey::RoleMember(role.clone(), user.clone()), &false);
+        .set(&DataKey::RoleMember(role.clone(), user.clone()), &RoleGrant::revoked());
 }
 
 /// Recursively check if `user` holds `role` (directly or via ancestors).
@@ -775,11 +1274,23 @@ pub(crate) fn has_role_recursive(env: &Env, role: &Symbol, user: &Address) -> bo
     false
 }
 
+/// Returns `true` when `user` holds `role` right now — active, and, if
+/// time-bounded, not yet past its `expires_at` ledger timestamp.
 fn role_member(env: &Env, role: &Symbol, user: &Address) -> bool {
+    let now = env.ledger().timestamp();
     env.storage()
         .instance()
-        .get::<DataKey, bool>(&DataKey::RoleMember(role.clone(), user.clone()))
+        .get::<DataKey, RoleGrant>(&DataKey::RoleMember(role.clone(), user.clone()))
+        .map(|grant| grant.is_in_effect(now))
         .unwrap_or(false)
+}
+
+/// Returns the stored role-grant record for `(role, user)`, if one exists —
+/// regardless of whether it is currently active or expired.
+fn role_grant(env: &Env, role: &Symbol, user: &Address) -> Option<RoleGrant> {
+    env.storage()
+        .instance()
+        .get::<DataKey, RoleGrant>(&DataKey::RoleMember(role.clone(), user.clone()))
 }
 
 /// Returns `true` when `ancestor_candidate` is an ancestor of `role` (i.e.
@@ -920,34 +1431,37 @@ mod tests {
         let client = client_for(&env, &contract_id);
         let role = Symbol::new(&env, "manager");
         let invitee = Address::generate(&env);
-        
+
         client.create_role(&super_admin, &role);
-        
+
         client.create_invitation(&super_admin, &role, &invitee, &3600);
         client.accept_invitation(&invitee, &role);
-        
+
         assert!(client.has_role(&role, &invitee));
     }
-    
+
     #[test]
     fn invitation_expired() {
         let (env, super_admin, contract_id) = setup();
         let client = client_for(&env, &contract_id);
         let role = Symbol::new(&env, "manager");
         let invitee = Address::generate(&env);
-        
+
         client.create_role(&super_admin, &role);
-        
+
         // 0 ttl means expires at current time
         client.create_invitation(&super_admin, &role, &invitee, &0);
-        
+
         // Advance time
         env.ledger().with_mut(|li| {
             li.timestamp = 1;
         });
-        
+
         let result = client.try_accept_invitation(&invitee, &role);
-        assert!(matches!(result, Err(Ok(AccessControlError::InvitationExpired))));
+        assert!(matches!(
+            result,
+            Err(Ok(AccessControlError::InvitationExpired))
+        ));
     }
 
     #[test]
@@ -957,29 +1471,35 @@ mod tests {
         let role = Symbol::new(&env, "manager");
         let user = Address::generate(&env);
         let invitee = Address::generate(&env);
-        
+
         client.create_role(&super_admin, &role);
-        
+
         let result = client.try_create_invitation(&user, &role, &invitee, &3600);
-        assert!(matches!(result, Err(Ok(AccessControlError::RoleEscalation))));
+        assert!(matches!(
+            result,
+            Err(Ok(AccessControlError::RoleEscalation))
+        ));
     }
-    
+
     #[test]
     fn rate_limit_enforced() {
         let (env, super_admin, contract_id) = setup();
         let client = client_for(&env, &contract_id);
         let role = Symbol::new(&env, "manager");
-        
+
         client.create_role(&super_admin, &role);
-        
+
         for _ in 0..10 {
             let invitee = Address::generate(&env);
             client.create_invitation(&super_admin, &role, &invitee, &3600);
         }
-        
+
         let invitee = Address::generate(&env);
         let result = client.try_create_invitation(&super_admin, &role, &invitee, &3600);
-        assert!(matches!(result, Err(Ok(AccessControlError::RateLimitExceeded))));
+        assert!(matches!(
+            result,
+            Err(Ok(AccessControlError::RateLimitExceeded))
+        ));
     }
 
     #[test]
@@ -988,14 +1508,17 @@ mod tests {
         let client = client_for(&env, &contract_id);
         let role = Symbol::new(&env, "manager");
         let invitee = Address::generate(&env);
-        
+
         client.create_role(&super_admin, &role);
         client.create_invitation(&super_admin, &role, &invitee, &3600);
-        
+
         client.revoke_invitation(&super_admin, &role, &invitee);
-        
+
         let result = client.try_accept_invitation(&invitee, &role);
-        assert!(matches!(result, Err(Ok(AccessControlError::InvitationNotFound))));
+        assert!(matches!(
+            result,
+            Err(Ok(AccessControlError::InvitationNotFound))
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1217,6 +1740,129 @@ mod tests {
         // Grant employee to user — should NOT satisfy manager check.
         client.grant_role(&super_admin, &employee, &user);
         assert!(!client.has_role(&manager, &user));
+    }
+
+    // -----------------------------------------------------------------------
+    // Time-bounded role grants (#190)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn timed_grant_is_active_before_expiration() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "auditor");
+        let user = Address::generate(&env);
+
+        client.create_role(&super_admin, &role);
+        client.grant_role_timed(&super_admin, &role, &user, &3600);
+
+        assert!(client.has_role(&role, &user));
+        assert_eq!(
+            client.get_role_expiration(&role, &user),
+            Some(env.ledger().timestamp() + 3600)
+        );
+    }
+
+    #[test]
+    fn timed_grant_expires_automatically_without_manual_revocation() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "auditor");
+        let user = Address::generate(&env);
+
+        client.create_role(&super_admin, &role);
+        client.grant_role_timed(&super_admin, &role, &user, &3600);
+        assert!(client.has_role(&role, &user));
+
+        // Advance the ledger timestamp exactly to expiration — still in effect.
+        env.ledger().with_mut(|li| li.timestamp += 3600);
+        assert!(client.has_role(&role, &user));
+
+        // One second past expiration — now inactive, with no revoke_role call.
+        env.ledger().with_mut(|li| li.timestamp += 1);
+        assert!(!client.has_role(&role, &user));
+    }
+
+    #[test]
+    fn timed_grant_expiration_also_clears_hierarchy_scoped_permission_checks() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "manager");
+        let holder = Address::generate(&env);
+        let invitee = Address::generate(&env);
+
+        client.create_role(&super_admin, &role);
+        client.grant_role_timed(&super_admin, &role, &holder, &100);
+
+        // While active, the time-bounded holder can still exercise
+        // role-scoped authority (e.g. inviting into their own role).
+        client.create_invitation(&holder, &role, &invitee, &3600);
+        client.revoke_invitation(&holder, &role, &invitee);
+
+        env.ledger().with_mut(|li| li.timestamp += 101);
+
+        // Past expiration, the same address no longer holds the role and is
+        // denied with the same RoleEscalation error as any outsider.
+        let result = client.try_create_invitation(&holder, &role, &invitee, &3600);
+        assert!(matches!(
+            result,
+            Err(Ok(AccessControlError::RoleEscalation))
+        ));
+    }
+
+    #[test]
+    fn permanent_grant_is_unaffected_by_expiration_logic() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "auditor");
+        let user = Address::generate(&env);
+
+        client.create_role(&super_admin, &role);
+        client.grant_role(&super_admin, &role, &user);
+
+        assert_eq!(client.get_role_expiration(&role, &user), None);
+
+        env.ledger().with_mut(|li| li.timestamp += 10_000_000);
+        assert!(client.has_role(&role, &user));
+    }
+
+    #[test]
+    fn zero_duration_timed_grant_is_rejected() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "auditor");
+        let user = Address::generate(&env);
+
+        client.create_role(&super_admin, &role);
+        let result = client.try_grant_role_timed(&super_admin, &role, &user, &0);
+        assert!(matches!(
+            result,
+            Err(Ok(AccessControlError::InvalidDuration))
+        ));
+    }
+
+    #[test]
+    fn non_admin_cannot_grant_timed_role() {
+        let (env, _super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "auditor");
+        let outsider = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.create_role(&_super_admin, &role);
+        let result = client.try_grant_role_timed(&outsider, &role, &user, &3600);
+        assert!(matches!(result, Err(Ok(AccessControlError::NotAdmin))));
+    }
+
+    #[test]
+    fn get_role_expiration_is_none_for_unknown_grant() {
+        let (env, _super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let role = Symbol::new(&env, "auditor");
+        let user = Address::generate(&env);
+
+        client.create_role(&_super_admin, &role);
+        assert_eq!(client.get_role_expiration(&role, &user), None);
     }
 
     #[test]
@@ -1480,4 +2126,343 @@ mod tests {
         let last = events.last().unwrap();
         assert_eq!(last.1, (EV_ADMIN_REMOVED,).into_val(&env));
     }
+
+    // -----------------------------------------------------------------------
+    // Ownership transfer contract tests (Issue #150)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ownership_transfer_lifecycle() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let new_owner = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        // Initially: super_admin holds ownership
+        assert_eq!(client.super_admin(), super_admin);
+        assert!(client.is_admin(&super_admin));
+        assert!(client.has_role(&symbol_short!("super"), &super_admin));
+        assert!(!client.is_admin(&new_owner));
+        assert_eq!(client.get_pending_ownership(), None);
+
+        // 1. Propose transfer
+        client.transfer_ownership(&super_admin, &new_owner, &200);
+
+        let pending = client.get_pending_ownership().unwrap();
+        assert_eq!(pending.current_owner, super_admin);
+        assert_eq!(pending.target_owner, new_owner);
+        assert_eq!(pending.expiry, 200);
+
+        // Crucial acceptance criterion: ownership does not change until accepted
+        assert_eq!(client.super_admin(), super_admin);
+        assert!(client.has_role(&symbol_short!("super"), &super_admin));
+        assert!(!client.has_role(&symbol_short!("super"), &new_owner));
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        assert_eq!(last.1, (EV_OWNERSHIP_TRANSFER_PROPOSED,).into_val(&env));
+
+        // 2. Accept transfer by target owner
+        env.ledger().set_timestamp(150);
+        client.accept_ownership(&new_owner);
+
+        // State after acceptance
+        assert_eq!(client.super_admin(), new_owner);
+        assert!(client.is_admin(&new_owner));
+        assert!(client.has_role(&symbol_short!("super"), &new_owner));
+        assert!(!client.has_role(&symbol_short!("super"), &super_admin));
+        assert_eq!(client.get_pending_ownership(), None);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        assert_eq!(last.1, (EV_OWNERSHIP_TRANSFER_ACCEPTED,).into_val(&env));
+    }
+
+    #[test]
+    fn ownership_transfer_cancel() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let new_owner = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        client.transfer_ownership(&super_admin, &new_owner, &200);
+        assert!(client.get_pending_ownership().is_some());
+
+        // Cancel by super_admin
+        client.cancel_ownership_transfer(&super_admin);
+        assert_eq!(client.get_pending_ownership(), None);
+        assert_eq!(client.super_admin(), super_admin);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        assert_eq!(last.1, (EV_OWNERSHIP_TRANSFER_CANCELLED,).into_val(&env));
+
+        // Target cannot accept after cancellation
+        assert_eq!(
+            client.try_accept_ownership(&new_owner),
+            Err(Ok(AccessControlError::NoPendingTransfer))
+        );
+    }
+
+    #[test]
+    fn ownership_transfer_expiry_rejected() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let new_owner = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        client.transfer_ownership(&super_admin, &new_owner, &200);
+
+        // Advance ledger past expiry
+        env.ledger().set_timestamp(201);
+
+        assert_eq!(
+            client.try_accept_ownership(&new_owner),
+            Err(Ok(AccessControlError::TransferExpired))
+        );
+
+        // Ownership remains unchanged
+        assert_eq!(client.super_admin(), super_admin);
+        assert_eq!(client.get_pending_ownership(), None);
+    }
+
+    #[test]
+    fn ownership_transfer_unauthorized_accept_rejected() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let new_owner = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        client.transfer_ownership(&super_admin, &new_owner, &200);
+
+        assert_eq!(
+            client.try_accept_ownership(&stranger),
+            Err(Ok(AccessControlError::NotPendingOwner))
+        );
+
+        assert_eq!(client.super_admin(), super_admin);
+    }
+
+    #[test]
+    fn ownership_transfer_unauthorized_propose_and_cancel_rejected() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let new_owner = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        // Stranger cannot propose
+        assert_eq!(
+            client.try_transfer_ownership(&stranger, &new_owner, &200),
+            Err(Ok(AccessControlError::NotAdmin))
+        );
+
+        client.transfer_ownership(&super_admin, &new_owner, &200);
+
+        // Stranger cannot cancel
+        assert_eq!(
+            client.try_cancel_ownership_transfer(&stranger),
+            Err(Ok(AccessControlError::NotAdmin))
+        );
+    }
+
+    #[test]
+    fn ownership_transfer_duplicate_proposal_rejected() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        client.transfer_ownership(&super_admin, &owner1, &200);
+
+        assert_eq!(
+            client.try_transfer_ownership(&super_admin, &owner2, &250),
+            Err(Ok(AccessControlError::TransferAlreadyPending))
+        );
+    }
+
+    #[test]
+    fn ownership_transfer_invalid_arguments_rejected() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let target = Address::generate(&env);
+        env.ledger().set_timestamp(100);
+
+        // Expiry in past or equal to current timestamp
+        assert_eq!(
+            client.try_transfer_ownership(&super_admin, &target, &100),
+            Err(Ok(AccessControlError::InvalidExpiry))
+        );
+        assert_eq!(
+            client.try_transfer_ownership(&super_admin, &target, &99),
+            Err(Ok(AccessControlError::InvalidExpiry))
+        );
+
+        // Self transfer
+        assert_eq!(
+            client.try_transfer_ownership(&super_admin, &super_admin, &200),
+            Err(Ok(AccessControlError::SelfReference))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Emergency circuit breaker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn admin_can_pause_a_scope_and_pauser_is_recorded() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let scope = symbol_short!("roles");
+        let paused_at = 1_700_000_000_u64;
+        env.ledger().set_timestamp(paused_at);
+
+        assert!(!client.is_paused(&scope));
+
+        client.pause(&super_admin, &scope);
+
+        assert!(client.is_paused(&scope));
+
+        let paused_by: Option<Address> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::PausedBy(scope.clone()))
+        });
+        let recorded_at: Option<u64> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::PausedAt(scope.clone()))
+        });
+        assert_eq!(paused_by, Some(super_admin));
+        assert_eq!(recorded_at, Some(paused_at));
+    }
+
+    #[test]
+    fn admin_can_resume_a_paused_scope_and_state_is_cleared() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let scope = symbol_short!("roles");
+
+        client.pause(&super_admin, &scope);
+        assert!(client.is_paused(&scope));
+
+        client.resume(&super_admin, &scope);
+
+        assert!(!client.is_paused(&scope));
+        let cleared = env.as_contract(&contract_id, || {
+            let paused_by: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedBy(scope.clone()));
+            let paused_at: Option<u64> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedAt(scope.clone()));
+            paused_by.is_none() && paused_at.is_none()
+        });
+        assert!(cleared);
+    }
+
+    #[test]
+    fn pausing_one_scope_leaves_other_scopes_running() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let roles = symbol_short!("roles");
+        let admins = symbol_short!("admins");
+        let invites = symbol_short!("invites");
+
+        client.pause(&super_admin, &roles);
+
+        assert!(client.is_paused(&roles));
+        assert!(!client.is_paused(&admins));
+        assert!(!client.is_paused(&invites));
+    }
+
+    #[test]
+    fn non_admin_cannot_pause_or_resume() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let stranger = Address::generate(&env);
+        let scope = symbol_short!("roles");
+
+        assert_eq!(
+            client.try_pause(&stranger, &scope),
+            Err(Ok(AccessControlError::NotAdmin))
+        );
+        assert!(!client.is_paused(&scope));
+
+        client.pause(&super_admin, &scope);
+        assert_eq!(
+            client.try_resume(&stranger, &scope),
+            Err(Ok(AccessControlError::NotAdmin))
+        );
+        // The unauthorized resume attempt must not clear the pause.
+        assert!(client.is_paused(&scope));
+    }
+
+    #[test]
+    fn pause_and_resume_reject_invalid_arguments_and_duplicates() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let scope = symbol_short!("roles");
+        let bogus = symbol_short!("bogus");
+
+        assert_eq!(
+            client.try_pause(&super_admin, &bogus),
+            Err(Ok(AccessControlError::InvalidPauseScope))
+        );
+        assert_eq!(
+            client.try_resume(&super_admin, &bogus),
+            Err(Ok(AccessControlError::InvalidPauseScope))
+        );
+
+        // Resuming something that was never paused is an error.
+        assert_eq!(
+            client.try_resume(&super_admin, &scope),
+            Err(Ok(AccessControlError::NotPaused))
+        );
+
+        // Pausing twice is an error.
+        client.pause(&super_admin, &scope);
+        assert_eq!(
+            client.try_pause(&super_admin, &scope),
+            Err(Ok(AccessControlError::OperationPaused))
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_are_audited_with_state_transitions() {
+        let (env, super_admin, contract_id) = setup();
+        let client = client_for(&env, &contract_id);
+        let scope = symbol_short!("roles");
+
+        client.pause(&super_admin, &scope);
+        client.resume(&super_admin, &scope);
+
+        // Newest first: resume (1 -> 0) then pause (0 -> 1).
+        let audit = client.audit_trail(&super_admin, &10);
+
+        let resume = audit.get(0).unwrap();
+        assert_eq!(resume.actor, super_admin);
+        assert_eq!(resume.scope, symbol_short!("access"));
+        assert_eq!(resume.action, symbol_short!("resume"));
+        assert_eq!(resume.reason, symbol_short!("breaker"));
+        assert_eq!(resume.resource, None);
+        assert_eq!(resume.attribute, Some(scope.clone()));
+        assert_eq!(resume.before, Some(1));
+        assert_eq!(resume.after, Some(0));
+
+        let pause = audit.get(1).unwrap();
+        assert_eq!(pause.actor, super_admin);
+        assert_eq!(pause.scope, symbol_short!("access"));
+        assert_eq!(pause.action, symbol_short!("pause"));
+        assert_eq!(pause.reason, symbol_short!("breaker"));
+        assert_eq!(pause.resource, None);
+        assert_eq!(pause.attribute, Some(scope.clone()));
+        assert_eq!(pause.before, Some(0));
+        assert_eq!(pause.after, Some(1));
+    }
+
 }

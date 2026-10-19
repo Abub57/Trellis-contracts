@@ -42,6 +42,8 @@ uses, so a new privileged action adds a row rather than a new bespoke check.
 | `InviteMember(role)` | `ManageRoles` | Role-scoped to `role` | `create_invitation` |
 | `CancelInvitation(inviter)` | `ManageRoles` | Owner-scoped to `inviter` | `revoke_invitation` |
 | `ReadAuditTrail` | `ReadAuditTrail` | Global | `audit_trail` |
+| `TransferOwnership` | `ManageRoles` | Global | `transfer_ownership` |
+| `CancelOwnershipTransfer` | `ManageRoles` | Global | `cancel_ownership_transfer` |
 
 Scope narrows authority beyond the role:
 
@@ -73,6 +75,23 @@ The aid contract grants `Pauser` access through `set_pauser`. The referral
 contract grants `ReferralManager` access through `set_referral_manager`.
 Oracle submitters remain controlled by the oracle's existing explicit
 registration/deactivation API.
+
+## Time-bounded role grants
+
+`grant_role` grants a role permanently. `grant_role_timed(caller, role, account,
+duration_seconds)` grants it for a fixed window measured from the current
+ledger timestamp instead — same authorization as `grant_role` (the
+`AssignRoles` action). The grant is stored as a `RoleGrant { active,
+expires_at }` record; `expires_at: None` means permanent, `expires_at:
+Some(ts)` means the grant is only in effect while `env.ledger().timestamp()
+<= ts`.
+
+`has_role` (and everything built on it, including the permission matrix's
+role-scoped checks in `permissions.rs`) treats an expired grant as absent
+automatically — no relayer or follow-up `revoke_role` transaction is needed
+once the ledger timestamp passes `expires_at`. `get_role_expiration(role,
+account)` returns the stored `expires_at` for introspection (`None` for a
+permanent grant or an address that never held the role).
 
 ## Initialization and upgrades
 

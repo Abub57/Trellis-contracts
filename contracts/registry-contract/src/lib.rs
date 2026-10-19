@@ -39,6 +39,13 @@ const KEY_METADATA: Symbol = symbol_short!("metadata");
 const KEY_HISTORY: Symbol = symbol_short!("history");
 const KEY_NAMES: Symbol = symbol_short!("names");
 const KEY_META_NAMES: Symbol = symbol_short!("meta_nms");
+const KEY_DEACTIVATED: Symbol = symbol_short!("deact");
+const KEY_DEACT_HIST: Symbol = symbol_short!("deacth");
+
+/// Bound global registry scans so getters and writes stay within Soroban
+/// execution budgets. Version history is independently bounded per name.
+pub const MAX_REGISTRY_ENTRIES: u32 = 64;
+pub const MAX_VERSION_HISTORY: u32 = 64;
 
 /// Represents a registered contract with its address and version.
 #[contracttype]
@@ -70,6 +77,18 @@ pub struct MetadataEntry {
 pub struct RegistryEntry {
     pub contract: ContractRegistration,
     pub metadata: MetadataEntry,
+}
+
+/// Records the deactivation state of a registered contract name.
+///
+/// A deactivated record remains discoverable via `get_contract` so that
+/// callers can observe the state, but restricted operations must check
+/// [`RegistryContract::is_active`] before executing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeactivationState {
+    pub deactivated: bool,
+    pub deactivated_at: u64,
 }
 // ===========================================================================
 // Contract Implementation
@@ -110,6 +129,25 @@ impl RegistryContract {
     ) -> Result<(), Error> {
         auth::require_admin(&env, &caller)?;
 
+        // A deactivated name must be reactivated before it can be re-registered.
+        if let Some(state) = persistent_read::<_, DeactivationState>(&env, &(KEY_DEACTIVATED, name.clone())) {
+            if state.deactivated {
+                return Err(Error::InvalidArgument);
+            }
+        }
+
+        ensure_name_capacity(&env, &KEY_NAMES, &name)?;
+        let mut versions: Vec<u32> =
+            persistent_get(&env, &(KEY_HISTORY, name.clone())).unwrap_or_else(|| Vec::new(&env));
+        let already_present =
+            !versions.is_empty() && versions.get(versions.len() - 1).unwrap_or(0) == version;
+        if !already_present && !versions.iter().any(|existing| existing == version) {
+            if versions.len() >= MAX_VERSION_HISTORY {
+                return Err(Error::InvalidArgument);
+            }
+            versions.push_back(version);
+        }
+
         persistent_set(
             &env,
             &(KEY_CONTRACTS, name.clone()),
@@ -123,18 +161,8 @@ impl RegistryContract {
         // Check the latest version first to avoid deserializing the full
         // history Vec when the version already exists.
         // Record version history
-        let mut versions: Vec<u32> =
-            persistent_get(&env, &(KEY_HISTORY, name.clone())).unwrap_or_else(|| Vec::new(&env));
-
-        // Fast path: if the last element matches, no update needed.
-        let already_present =
-            !versions.is_empty() && versions.get(versions.len() - 1).unwrap_or(0) == version;
         if !already_present {
-            // Only do the full linear scan if the fast path didn't match.
-            if !versions.iter().any(|existing| existing == version) {
-                versions.push_back(version);
-                persistent_set(&env, &(KEY_HISTORY, name.clone()), &versions);
-            }
+            persistent_set(&env, &(KEY_HISTORY, name.clone()), &versions);
         }
 
         emit_action_executed(
@@ -160,6 +188,103 @@ impl RegistryContract {
         persistent_read(&env, &(KEY_HISTORY, name)).ok_or(Error::NotFound)
     }
 
+    // ─── Deactivation ───────────────────────────────────────────────────────
+
+    /// Deactivate a registered contract record.
+    ///
+    /// Only the admin may deactivate, and only records that currently exist
+    /// and are not already deactivated are eligible. Deactivation is a soft
+    /// state change: the record remains discoverable but restricted
+    /// operations must reject it until it is reactivated.
+    pub fn deactivate_contract(
+        env: Env,
+        caller: Address,
+        name: Symbol,
+    ) -> Result<(), Error> {
+        auth::require_admin(&env, &caller)?;
+
+        // Eligibility: the record must exist.
+        if persistent_read::<_, ContractRegistration>(&env, &(KEY_CONTRACTS, name.clone())).is_none() {
+            return Err(Error::NotFound);
+        }
+
+        // Eligibility: must not already be deactivated.
+        if let Some(state) = persistent_read::<_, DeactivationState>(&env, &(KEY_DEACTIVATED, name.clone())) {
+            if state.deactivated {
+                return Err(Error::InvalidArgument);
+            }
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let state = DeactivationState {
+            deactivated: true,
+            deactivated_at: timestamp,
+        };
+        persistent_set(&env, &(KEY_DEACTIVATED, name.clone()), &state);
+
+        emit_action_executed(
+            &env,
+            symbol_short!("registry"),
+            symbol_short!("deact"),
+            &caller,
+            true,
+            timestamp,
+        );
+        Ok(())
+    }
+
+    /// Reactivate a previously deactivated contract record.
+    ///
+    /// Only the admin may reactivate, and only records currently marked as
+    /// deactivated are eligible.
+    pub fn reactivate_contract(
+        env: Env,
+        caller: Address,
+        name: Symbol,
+    ) -> Result<(), Error> {
+        auth::require_admin(&env, &caller)?;
+
+        let state: DeactivationState = persistent_read(&env, &(KEY_DEACTIVATED, name.clone()))
+            .ok_or(Error::NotFound)?;
+        if !state.deactivated {
+            return Err(Error::InvalidArgument);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let new_state = DeactivationState {
+            deactivated: false,
+            deactivated_at: timestamp,
+        };
+        persistent_set(&env, &(KEY_DEACTIVATED, name.clone()), &new_state);
+
+        emit_action_executed(
+            &env,
+            symbol_short!("registry"),
+            symbol_short!("react"),
+            &caller,
+            true,
+            timestamp,
+        );
+        Ok(())
+    }
+
+    /// Return whether a registered name is currently active.
+    ///
+    /// Names that have never been deactivated are considered active.
+    pub fn is_active(env: Env, name: Symbol) -> Result<bool, Error> {
+        persistent_read::<_, ContractRegistration>(&env, &(KEY_CONTRACTS, name.clone()))
+            .ok_or(Error::NotFound)?;
+        match persistent_read::<_, DeactivationState>(&env, &(KEY_DEACTIVATED, name)) {
+            Some(state) => Ok(!state.deactivated),
+            None => Ok(true),
+        }
+    }
+
+    /// Return the deactivation state for a name, if it has ever been toggled.
+    pub fn get_deactivation_state(env: Env, name: Symbol) -> Result<DeactivationState, Error> {
+        persistent_read(&env, &(KEY_DEACTIVATED, name)).ok_or(Error::NotFound)
+    }
+
     // ─── Metadata Registry ──────────────────────────────────────────────────
 
     /// Register or update metadata for an identifier.
@@ -181,6 +306,8 @@ impl RegistryContract {
         schema_version: u32,
     ) -> Result<(), Error> {
         auth::require_admin(&env, &caller)?;
+
+        ensure_name_capacity(&env, &KEY_META_NAMES, &name)?;
 
         // Check if entry exists and is immutable
         if let Some(existing) =
@@ -269,6 +396,17 @@ fn push_unique_symbol(env: &Env, key: &Symbol, value: &Symbol) {
     }
 }
 
+/// Reject a new registry name before any storage mutation once its directory
+/// would exceed the maximum size. Existing names remain freely updatable.
+fn ensure_name_capacity(env: &Env, key: &Symbol, name: &Symbol) -> Result<(), Error> {
+    let names: Vec<Symbol> = persistent_get(env, key).unwrap_or_else(|| Vec::new(env));
+    if names.iter().any(|existing| existing == *name) || names.len() < MAX_REGISTRY_ENTRIES {
+        Ok(())
+    } else {
+        Err(Error::InvalidArgument)
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -322,6 +460,61 @@ mod tests {
     }
 
     #[test]
+    fn registry_rejects_the_first_name_over_the_scan_limit_without_writing_it() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let registry_id = env.register_contract(None, RegistryContract);
+        let admin = Address::generate(&env);
+        let registry = RegistryContractClient::new(&env, &registry_id);
+        registry.initialize(&admin);
+
+        for index in 0..MAX_REGISTRY_ENTRIES {
+            let name = Symbol::new(&env, &std::format!("c{index}"));
+            let address = Address::generate(&env);
+            registry.set_contract(&admin, &name, &address, &1);
+        }
+
+        let overflow_name = Symbol::new(&env, "overflow_name");
+        let overflow_address = Address::generate(&env);
+        assert_eq!(
+            registry.try_set_contract(&admin, &overflow_name, &overflow_address, &1),
+            Err(Ok(Error::InvalidArgument))
+        );
+        assert_eq!(registry.list_names().len(), MAX_REGISTRY_ENTRIES);
+        assert_eq!(
+            registry.try_get_contract(&overflow_name),
+            Err(Ok(Error::NotFound))
+        );
+    }
+
+    #[test]
+    fn version_history_rejects_overflow_without_replacing_the_current_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let registry_id = env.register_contract(None, RegistryContract);
+        let admin = Address::generate(&env);
+        let registry = RegistryContractClient::new(&env, &registry_id);
+        registry.initialize(&admin);
+        let name = Symbol::new(&env, "history_bound");
+
+        for version in 1..=MAX_VERSION_HISTORY {
+            let address = Address::generate(&env);
+            registry.set_contract(&admin, &name, &address, &version);
+        }
+
+        let last_address = Address::generate(&env);
+        assert_eq!(
+            registry.try_set_contract(&admin, &name, &last_address, &(MAX_VERSION_HISTORY + 1)),
+            Err(Ok(Error::InvalidArgument))
+        );
+        assert_eq!(
+            registry.get_version_history(&name).len(),
+            MAX_VERSION_HISTORY
+        );
+        assert_eq!(registry.get_contract(&name).1, MAX_VERSION_HISTORY);
+    }
+
+    #[test]
     fn rejects_non_admin_registration() {
         let env = Env::default();
         env.mock_all_auths();
@@ -338,6 +531,8 @@ mod tests {
             registry.try_set_contract(&attacker, &name, &treasury, &1_u32),
             Err(Ok(Error::Unauthorized))
         ));
+        assert!(registry.list_names().is_empty());
+        assert_eq!(registry.try_get_contract(&name), Err(Ok(Error::NotFound)));
     }
 
     // ===========================================================================
@@ -503,6 +698,59 @@ mod tests {
             ),
             Err(Ok(Error::InvalidHash))
         ));
+    }
+
+    #[test]
+    fn malformed_metadata_payloads_do_not_partially_mutate_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let registry_id = env.register_contract(None, RegistryContract);
+        let admin = Address::generate(&env);
+        let registry = RegistryContractClient::new(&env, &registry_id);
+        registry.initialize(&admin);
+
+        let name = Symbol::new(&env, "payload_test");
+        let original_uri = Bytes::from_slice(&env, b"ipfs://QmOriginal");
+        let original_hash = create_test_hash(&env);
+        registry.set_metadata(&admin, &name, &original_uri, &original_hash, &false, &1);
+
+        let mut oversized_uri = Bytes::new(&env);
+        for _ in 0..=shared::sanitize::MAX_URL_LEN {
+            oversized_uri.push_back(b'a');
+        }
+        assert_eq!(
+            registry.try_set_metadata(&admin, &name, &oversized_uri, &original_hash, &false, &1),
+            Err(Ok(Error::InvalidArgument))
+        );
+        let unchanged = registry.get_metadata(&name);
+        assert_eq!(unchanged.uri, original_uri);
+        assert_eq!(unchanged.hash, original_hash);
+
+        let unsafe_uri = Bytes::from_slice(&env, b"javascript:alert(1)");
+        assert_eq!(
+            registry.try_set_metadata(&admin, &name, &unsafe_uri, &original_hash, &false, &1),
+            Err(Ok(Error::InvalidArgument))
+        );
+        assert_eq!(registry.get_metadata(&name), unchanged);
+
+        let malformed_name = Symbol::new(&env, "bad_hash");
+        let malformed_hash = Bytes::from_slice(&env, b"short");
+        assert_eq!(
+            registry.try_set_metadata(
+                &admin,
+                &malformed_name,
+                &original_uri,
+                &malformed_hash,
+                &false,
+                &1
+            ),
+            Err(Ok(Error::InvalidHash))
+        );
+        assert_eq!(
+            registry.try_get_metadata(&malformed_name),
+            Err(Ok(Error::MetadataNotFound))
+        );
+        assert_eq!(registry.list_metadata_entries().len(), 1);
     }
 
     #[test]
